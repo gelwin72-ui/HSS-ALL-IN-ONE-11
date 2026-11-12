@@ -6,7 +6,8 @@ import {defineConfig} from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
-  const basePath = './';
+  const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || !!process.env.VERCEL_URL;
+  const basePath = isVercel ? '/' : '/HSS-ALL-IN-ONE-11/';
   return {
     base: basePath,
     plugins: [
