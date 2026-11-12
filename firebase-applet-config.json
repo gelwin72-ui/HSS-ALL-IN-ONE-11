@@ -3,6 +3,7 @@
   "appId": "1:60266185532:web:7d80fd6c9534b79d36d439",
   "apiKey": "AIzaSyAwW8IU4DnwAc4iArTD2VeIDCEK1eodewA",
   "authDomain": "hssallinone2026.firebaseapp.com",
+  "databaseURL": "https://hssallinone2026-default-rtdb.firebaseio.com",
   "firestoreDatabaseId": "ai-studio-remixhssallinone-55b89812-ee43-4bd9-aa89-b18c6fc3861d",
   "storageBucket": "hssallinone2026.firebasestorage.app",
   "messagingSenderId": "60266185532",
