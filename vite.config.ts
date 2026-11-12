@@ -6,9 +6,10 @@ import {defineConfig} from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
-  const basePath = process.env.VITE_BASE_PATH || './';
+  const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || !!process.env.VERCEL_URL;
+  const basePath = isVercel ? '/' : (process.env.VITE_BASE_PATH || '/HSS-ALL-IN-ONE-App-/');
   return {
-    base: '/HSS-ALL-IN-ONE-App-/',
+    base: basePath,
     plugins: [
       react(),
       tailwindcss(),
