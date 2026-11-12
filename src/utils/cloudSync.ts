@@ -1914,6 +1914,7 @@ class CloudSyncManager {
       name: teacher.name,
       gmail: cleanGmail,
       email: cleanGmail,
+      password: teacher.password || '',
       status: 'active',
       academicYear: teacher.academicYear || '',
       dob: teacher.dob || '',

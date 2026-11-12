@@ -284,7 +284,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       name: signupName.trim(),
       email: cleanEmail,
       gmail: cleanEmail,
-      password: '',
+      password: signupPassword,
       status: 'active',
       academicYear: signupAcademicYear.trim(),
       phone: signupPhone.trim(),
