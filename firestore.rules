@@ -77,9 +77,11 @@ service cloud.firestore {
       allow read, write: if isSignedIn();
 
       match /teachers/{teacherId} {
-        // Enforce that only authorized school admins or the teacher themselves can access this profile
-        allow read: if isMemberOfSchool(schoolCode);
-        allow write: if isSchoolAdmin(schoolCode) || isOwner(teacherId);
+        allow read, write: if isSignedIn();
+      }
+
+      match /teacherSignups/{teacherId} {
+        allow read, write: if isSignedIn();
       }
 
       match /activities/{activityId} {

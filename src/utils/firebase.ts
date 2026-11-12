@@ -56,12 +56,13 @@ import firebaseConfigJson from '../../firebase-applet-config.json';
 const env = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : {};
 
 export const firebaseConfig = {
-  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfigJson?.projectId || 'hss-all-in-one',
+  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfigJson?.projectId || 'hssallinone2026',
   appId: env.VITE_FIREBASE_APP_ID || firebaseConfigJson?.appId || '',
   apiKey: env.VITE_FIREBASE_API_KEY || firebaseConfigJson?.apiKey || '',
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson?.authDomain || `${firebaseConfigJson?.projectId || 'hss-all-in-one'}.firebaseapp.com`,
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson?.authDomain || `${firebaseConfigJson?.projectId || 'hssallinone2026'}.firebaseapp.com`,
   databaseURL: env.VITE_FIREBASE_DATABASE_URL || (firebaseConfigJson as any)?.databaseURL || '',
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigJson?.storageBucket || `${firebaseConfigJson?.projectId || 'hss-all-in-one'}.firebasestorage.app`,
+  firestoreDatabaseId: env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || (firebaseConfigJson as any)?.firestoreDatabaseId || 'ai-studio-remixhssallinone-55b89812-ee43-4bd9-aa89-b18c6fc3861d',
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigJson?.storageBucket || `${firebaseConfigJson?.projectId || 'hssallinone2026'}.firebasestorage.app`,
   messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfigJson?.messagingSenderId || '',
   measurementId: env.VITE_FIREBASE_MEASUREMENT_ID || firebaseConfigJson?.measurementId || '',
   oAuthClientId: env.VITE_FIREBASE_OAUTH_CLIENT_ID || firebaseConfigJson?.oAuthClientId || '',
@@ -113,36 +114,37 @@ export const loginWithGoogle = async () => {
 };
 
 // Safe RTDB Initialization (only if databaseURL is explicitly configured)
-let dbInstance: any = null;
+let rtdbInstance: any = null;
 try {
   if (firebaseConfig.databaseURL) {
-    dbInstance = getDatabase(app);
+    rtdbInstance = getDatabase(app);
   }
 } catch (err) {
   console.warn('[Firebase RTDB] Initialization warning:', err);
 }
-export const database: Database = dbInstance;
-export const db = database;
+export const database: Database = rtdbInstance;
 
-// Safe Firestore Initialization
+// Safe Firestore Initialization - Bound directly to user's Firestore Database ID
+const firestoreDbId = firebaseConfig.firestoreDatabaseId || 'ai-studio-remixhssallinone-55b89812-ee43-4bd9-aa89-b18c6fc3861d';
 let firestoreInstance: any = null;
 try {
   setLogLevel('silent');
 } catch {}
 
 try {
-  firestoreInstance = initializeFirestore(app, {
-    experimentalAutoDetectLongPolling: true,
-    ignoreUndefinedProperties: true
-  });
+  firestoreInstance = getFirestore(app, firestoreDbId);
 } catch (err) {
   try {
-    firestoreInstance = getFirestore(app);
+    firestoreInstance = initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true,
+      ignoreUndefinedProperties: true
+    }, firestoreDbId);
   } catch (e) {
     console.warn('[Firebase Firestore] Initialization warning:', e);
   }
 }
 export const firestore: Firestore = firestoreInstance;
+export const db: Firestore = firestoreInstance;
 
 // Direct Firestore Native Exports
 export {
@@ -184,7 +186,7 @@ if (firestore) {
 
 // Dual-Mode Firestore / Realtime DB wrappers
 export function doc(dbRefOrTarget: any, ...pathSegments: string[]) {
-  if (dbRefOrTarget === firestore || (!dbRefOrTarget && firestore)) {
+  if (dbRefOrTarget === firestore || dbRefOrTarget === db || (!dbRefOrTarget && firestore)) {
     const fullPath = pathSegments.filter(Boolean).join('/');
     return fsDoc(firestore, fullPath);
   }
@@ -194,8 +196,8 @@ export function doc(dbRefOrTarget: any, ...pathSegments: string[]) {
     if (database) return ref(database, fullPath);
   }
   const fullPath = pathSegments.filter(Boolean).join('/');
-  if (database) return ref(database, fullPath);
   if (firestore) return fsDoc(firestore, fullPath);
+  if (database) return ref(database, fullPath);
   return null;
 }
 

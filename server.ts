@@ -23,8 +23,8 @@ async function startServer() {
     try {
       if (!getApps().length) {
         initializeApp({
-          databaseURL: "https://hss-all-in-one-default-rtdb.firebaseio.com",
-          projectId: "hss-all-in-one"
+          databaseURL: "https://hssallinone2026-default-rtdb.firebaseio.com",
+          projectId: "hssallinone2026"
         });
       }
       return {

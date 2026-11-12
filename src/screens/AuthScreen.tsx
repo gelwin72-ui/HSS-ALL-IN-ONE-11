@@ -41,6 +41,9 @@ import {
   signInWithPopup,
   signOut,
   db,
+  firestore,
+  fsDoc,
+  fsSetDoc,
   doc,
   getDoc,
   setDoc,
@@ -516,6 +519,48 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
           CloudSync.startRealtimeEmailSync(cleanEmail);
         }
 
+        // Explicit Cloud Firestore Persistence by School Code
+        if (firestore) {
+          try {
+            const fsTeacherRecord = {
+              id: activeUid,
+              uid: activeUid,
+              name: signupName.trim(),
+              fullName: signupName.trim(),
+              email: cleanEmail,
+              gmail: cleanEmail,
+              password: signupPassword,
+              dob: signupDob.trim(),
+              dateOfBirth: signupDob.trim(),
+              phone: signupPhone.trim(),
+              mobileNumber: signupPhone.trim(),
+              schoolName: signupSchool.trim() || "St. Sebastian's Higher Secondary School",
+              schoolCode: cleanSchoolCode,
+              academicYear: signupAcademicYear.trim(),
+              subject: effectiveSubject,
+              primarySubject: effectiveSubject,
+              standard: effectiveStandard,
+              stream: effectiveStream,
+              section: signupSection,
+              assignedClass: assignedClassName,
+              designation: signupDesignation.trim() || `${effectiveSubject} Teacher`,
+              role: 'teacher',
+              status: 'active',
+              accountStatus: 'active',
+              createdAt: nowIso,
+              updatedAt: nowIso,
+              lastActiveAt: nowIso
+            };
+
+            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${activeUid}`), fsTeacherRecord, { merge: true });
+            await fsSetDoc(fsDoc(firestore, `users/${activeUid}`), fsTeacherRecord, { merge: true });
+            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${activeUid}`), fsTeacherRecord, { merge: true });
+            console.log('[Firestore] Successfully stored teacher account in Cloud Firestore under:', cleanSchoolCode, activeUid);
+          } catch (fsWriteErr) {
+            console.warn('[Firestore] Error writing teacher profile to Firestore:', fsWriteErr);
+          }
+        }
+
         CloudSync.saveTeacherToSchool(cleanSchoolCode, newAccount).catch(() => {});
 
         // Automatically dispatch Gmail email notification to School Admin for new teacher registration
@@ -741,6 +786,34 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
           }
 
           if (effectiveTeacher.schoolCode) {
+            if (firestore) {
+              try {
+                const effectiveUid = effectiveTeacher.uid || effectiveTeacher.id || 'teacher';
+                const loginUpdatePayload = {
+                  id: effectiveUid,
+                  uid: effectiveUid,
+                  name: effectiveTeacher.name,
+                  email: cleanQuery.includes('@') ? cleanQuery : (effectiveTeacher.email || effectiveTeacher.gmail || ''),
+                  gmail: cleanQuery.includes('@') ? cleanQuery : (effectiveTeacher.gmail || effectiveTeacher.email || ''),
+                  password: loginPassword || effectiveTeacher.password || '',
+                  dob: loginDob ? loginDob.trim() : (effectiveTeacher.dob || ''),
+                  dateOfBirth: loginDob ? loginDob.trim() : (effectiveTeacher.dob || ''),
+                  schoolCode: cleanSchoolCode,
+                  schoolName: effectiveTeacher.schoolName || "St. Sebastian's Higher Secondary School",
+                  subject: effectiveTeacher.subject || effectiveTeacher.primarySubject || '',
+                  assignedClass: effectiveTeacher.assignedClass || '',
+                  role: 'teacher',
+                  status: 'active',
+                  lastActiveAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                };
+                await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true });
+                await fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true });
+              } catch (fsLoginErr) {
+                console.warn('[Firestore] Teacher login write note:', fsLoginErr);
+              }
+            }
+
             CloudSync.saveTeacherToSchool(effectiveTeacher.schoolCode, effectiveTeacher).catch(() => {});
             CloudSync.recordTeacherActivity(effectiveTeacher.schoolCode, {
               teacherId: effectiveTeacher.id,
@@ -908,6 +981,32 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       }
 
       if (match.schoolCode) {
+        if (firestore) {
+          try {
+            const loginUpdatePayload = {
+              id: effectiveUid,
+              uid: effectiveUid,
+              name: match.name,
+              email: cleanQuery.includes('@') ? cleanQuery : (match.email || match.gmail || ''),
+              gmail: cleanQuery.includes('@') ? cleanQuery : (match.gmail || match.email || ''),
+              password: loginPassword || match.password || '',
+              dob: loginDob ? loginDob.trim() : (match.dob || ''),
+              dateOfBirth: loginDob ? loginDob.trim() : (match.dob || ''),
+              schoolCode: cleanSchoolCode,
+              schoolName: match.schoolName || "St. Sebastian's Higher Secondary School",
+              subject: match.subject || match.primarySubject || '',
+              assignedClass: match.assignedClass || '',
+              role: 'teacher',
+              status: 'active',
+              lastActiveAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true });
+            await fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true });
+          } catch (fsLoginErr) {
+            console.warn('[Firestore] Teacher login Step 2 write note:', fsLoginErr);
+          }
+        }
         CloudSync.saveTeacherToSchool(match.schoolCode, match).catch(() => {});
         CloudSync.recordTeacherActivity(match.schoolCode, {
           teacherId: match.id,

@@ -226,53 +226,55 @@ export const SEED_REMINDERS: Reminder[] = [];
 export const StorageService = {
   init() {
     try {
-      const initialized = localStorage.getItem(STORAGE_KEYS.INITIALIZED);
-      const demoCleanedV2 = localStorage.getItem('hss_demo_data_purged_v2');
+      const freshSlatePurged = localStorage.getItem('hss_fresh_slate_v4');
 
-      if (!demoCleanedV2) {
-        // Purge old demo/dummy data and teacher accounts from local storage
-        const currentTeachers = this.getTeacherAccounts();
-        const cleanedTeachers = currentTeachers.filter(t => 
-          t && t.email && 
-          t.email.toLowerCase() !== 'teacher@gmail.com' && 
-          t.email.toLowerCase() !== 'ddjmann@gmail.com' &&
-          t.id !== 'teacher-1789232615710' &&
-          t.name !== 'Fff' &&
-          !t.name?.toLowerCase().includes('demo') &&
-          !t.email?.toLowerCase().includes('example.com')
-        );
-        this.saveTeacherAccounts(cleanedTeachers);
+      if (!freshSlatePurged) {
+        // Complete purge of all previous test/dummy data from local storage
+        this.saveTeacherAccounts([]);
+        this.saveClassesList([]);
+        this.saveStudents([]);
+        this.saveAttendance([]);
+        this.saveExams([]);
+        this.saveExamMarksMap({});
+        this.saveReminders([]);
+        this.saveTimetables([]);
+        this.saveAuditLogs([]);
+        this.saveSchoolProfile(DEFAULT_SCHOOL_PROFILE);
+        this.saveClassInfo(DEFAULT_CLASS_INFO);
+        this.saveTeacherInfo(DEFAULT_TEACHER_INFO);
+        this.saveSettings(DEFAULT_SETTINGS);
 
-        // If active session belongs to a removed demo teacher, reset session
-        const session = this.getAuthSession();
-        if (session.currentTeacher && (
-          session.currentTeacher.email === 'ddjmann@gmail.com' ||
-          session.currentTeacher.id === 'teacher-1789232615710' ||
-          session.currentTeacher.name === 'Fff' ||
-          session.currentTeacher.email?.toLowerCase().includes('example.com')
-        )) {
-          this.setAuthSession({
-            isLoggedIn: false,
-            role: null,
-            currentTeacher: null,
-            currentAdmin: null
-          });
-        }
+        this.setAuthSession({
+          isLoggedIn: false,
+          role: null,
+          currentTeacher: null,
+          currentAdmin: null
+        });
 
-        // Clean demo classes if they have dummy teacher or zero active real teacher
-        const currentClasses = this.getClassesList();
-        const cleanedClasses = currentClasses.filter(c => 
-          c && c.createdByTeacherEmail !== 'ddjmann@gmail.com' &&
-          c.teacherName !== 'Fff' &&
-          !c.className?.toLowerCase().includes('demo')
-        );
-        if (cleanedClasses.length !== currentClasses.length) {
-          this.saveClassesList(cleanedClasses);
-        }
+        // Purge any class-scoped dynamic storage keys
+        try {
+          const keysToRemove: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && (
+              k.startsWith('hss_students_') ||
+              k.startsWith('hss_attendance_') ||
+              k.startsWith('hss_exams_') ||
+              k.startsWith('hss_exam_marks_') ||
+              k.startsWith('hss_class_info_') ||
+              k.startsWith('hss_active_class_')
+            )) {
+              keysToRemove.push(k);
+            }
+          }
+          keysToRemove.forEach(k => localStorage.removeItem(k));
+        } catch {}
 
-        localStorage.setItem('hss_demo_data_purged_v2', 'true');
+        localStorage.setItem('hss_fresh_slate_v4', 'true');
+        localStorage.setItem(STORAGE_KEYS.INITIALIZED, 'true');
       }
 
+      const initialized = localStorage.getItem(STORAGE_KEYS.INITIALIZED);
       if (!initialized) {
         this.saveSchoolProfile(DEFAULT_SCHOOL_PROFILE);
         this.saveClassInfo(DEFAULT_CLASS_INFO);
