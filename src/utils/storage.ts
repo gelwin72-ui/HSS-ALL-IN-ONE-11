@@ -71,6 +71,7 @@ const STORAGE_KEYS = {
   ACTIVE_CLASS_ID: 'hss_active_class_id_v2',
   PRINCIPAL_BROADCASTS: 'hss_principal_broadcasts_v1',
   TIMETABLES: 'hss_timetables_catalog_v2',
+  TIMETABLE_PREFS: 'hss_timetable_prefs_v1',
   AUDIT_LOGS: 'hss_audit_logs_v1'
 };
 
@@ -140,9 +141,7 @@ export const DEFAULT_PERIOD_TIMINGS: PeriodTimingConfig[] = [
   { periodNumber: 3, label: 'Period 3', startTime: '11:10 AM', endTime: '11:55 AM' },
   { periodNumber: 4, label: 'Period 4', startTime: '11:55 AM', endTime: '12:40 PM', isBreakAfter: true, breakLabel: 'Lunch Break (45m)' },
   { periodNumber: 5, label: 'Period 5', startTime: '01:25 PM', endTime: '02:10 PM' },
-  { periodNumber: 6, label: 'Period 6', startTime: '02:10 PM', endTime: '02:55 PM', isBreakAfter: true, breakLabel: 'Tea Break (10m)' },
-  { periodNumber: 7, label: 'Period 7', startTime: '03:05 PM', endTime: '03:50 PM' },
-  { periodNumber: 8, label: 'Period 8', startTime: '03:50 PM', endTime: '04:30 PM' }
+  { periodNumber: 6, label: 'Period 6', startTime: '02:10 PM', endTime: '02:55 PM' }
 ];
 
 export const TIMETABLE_DAYS: TimetableDay[] = [
@@ -150,8 +149,7 @@ export const TIMETABLE_DAYS: TimetableDay[] = [
   'Tuesday',
   'Wednesday',
   'Thursday',
-  'Friday',
-  'Saturday'
+  'Friday'
 ];
 
 export const DEFAULT_SCHOOL_ADMIN: SchoolAdminAccount = {
@@ -1594,6 +1592,104 @@ export const StorageService = {
     return true;
   },
 
+  // Timetable Period Timings & Saturday Preferences
+  getTimetablePrefKey(schoolCode?: string, teacherId?: string): string {
+    const cleanSchool = (schoolCode || 'default').trim().toUpperCase();
+    const cleanTeacher = (teacherId || 'default').trim();
+    return `${cleanSchool}::${cleanTeacher}`;
+  },
+
+  getAllTimetablePrefs(): Record<string, { periodTimings?: PeriodTimingConfig[]; includeSaturday?: boolean }> {
+    try {
+      const val = localStorage.getItem(STORAGE_KEYS.TIMETABLE_PREFS);
+      if (val) {
+        const parsed = JSON.parse(val);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  },
+
+  saveAllTimetablePrefs(prefs: Record<string, { periodTimings?: PeriodTimingConfig[]; includeSaturday?: boolean }>) {
+    localStorage.setItem(STORAGE_KEYS.TIMETABLE_PREFS, JSON.stringify(prefs));
+    notifyMutation();
+  },
+
+  getPeriodTimings(schoolCode?: string, teacherId?: string): PeriodTimingConfig[] {
+    const prefs = this.getAllTimetablePrefs();
+    const key = this.getTimetablePrefKey(schoolCode, teacherId);
+    const saved = prefs[key]?.periodTimings;
+    if (Array.isArray(saved) && saved.length > 0) {
+      return saved.slice(0, 6).map((p, idx) => ({
+        ...DEFAULT_PERIOD_TIMINGS[idx],
+        ...p,
+        periodNumber: p.periodNumber || idx + 1,
+        label: p.label || `Period ${idx + 1}`
+      }));
+    }
+    return DEFAULT_PERIOD_TIMINGS.map(p => ({ ...p }));
+  },
+
+  savePeriodTimings(timings: PeriodTimingConfig[], schoolCode?: string, teacherId?: string) {
+    const prefs = this.getAllTimetablePrefs();
+    const key = this.getTimetablePrefKey(schoolCode, teacherId);
+    const sanitized = timings.map((p, idx) => ({
+      ...DEFAULT_PERIOD_TIMINGS[idx],
+      ...p,
+      periodNumber: p.periodNumber || idx + 1,
+      label: (p.label || `Period ${idx + 1}`).trim()
+    }));
+    prefs[key] = {
+      ...(prefs[key] || {}),
+      periodTimings: sanitized
+    };
+    localStorage.setItem(STORAGE_KEYS.TIMETABLE_PREFS, JSON.stringify(prefs));
+
+    // Also update existing timetable slots for this teacher so their start/end times stay synchronized
+    if (teacherId) {
+      const allSlots = this.getTimetables();
+      let changed = false;
+      const updatedSlots = allSlots.map(slot => {
+        if (slot.teacherId === teacherId) {
+          const matchingTiming = sanitized.find(t => t.periodNumber === slot.periodNumber);
+          if (matchingTiming) {
+            changed = true;
+            return {
+              ...slot,
+              startTime: matchingTiming.startTime,
+              endTime: matchingTiming.endTime,
+              updatedAt: new Date().toISOString()
+            };
+          }
+        }
+        return slot;
+      });
+      if (changed) {
+        localStorage.setItem(STORAGE_KEYS.TIMETABLES, JSON.stringify(updatedSlots));
+      }
+    }
+
+    notifyMutation();
+  },
+
+  isSaturdayIncluded(schoolCode?: string, teacherId?: string): boolean {
+    const prefs = this.getAllTimetablePrefs();
+    const key = this.getTimetablePrefKey(schoolCode, teacherId);
+    return Boolean(prefs[key]?.includeSaturday);
+  },
+
+  setSaturdayIncluded(included: boolean, schoolCode?: string, teacherId?: string) {
+    const prefs = this.getAllTimetablePrefs();
+    const key = this.getTimetablePrefKey(schoolCode, teacherId);
+    prefs[key] = {
+      ...(prefs[key] || {}),
+      includeSaturday: included
+    };
+    this.saveAllTimetablePrefs(prefs);
+  },
+
   getTeacherTimetable(teacherId: string, schoolCode?: string): TimetableSlot[] {
     const all = this.getTimetables(schoolCode);
     const cleanTeacherId = (teacherId || '').trim();
@@ -1616,7 +1712,7 @@ export const StorageService = {
       return [];
     }
 
-    const days: TimetableDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const days: TimetableDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
     const periods = DEFAULT_PERIOD_TIMINGS;
 
     const scienceSubjects = [
@@ -1625,9 +1721,7 @@ export const StorageService = {
       { name: 'Mathematics', code: 'MAT', type: 'lecture' as const, room: 'Room 103' },
       { name: 'Biology', code: 'BIO', type: 'lecture' as const, room: 'Room 104' },
       { name: 'English', code: 'ENG', type: 'lecture' as const, room: 'Room 105' },
-      { name: 'Computer Science', code: 'CS', type: 'lab' as const, room: 'CS Lab 1' },
-      { name: 'Malayalam / Lang', code: 'MAL', type: 'lecture' as const, room: 'Room 106' },
-      { name: 'Physics Practical Lab', code: 'PHY-LAB', type: 'practical' as const, room: 'Physics Lab' }
+      { name: 'Computer Science', code: 'CS', type: 'lab' as const, room: 'CS Lab 1' }
     ];
 
     const commerceSubjects = [
@@ -1636,9 +1730,7 @@ export const StorageService = {
       { name: 'Economics', code: 'ECO', type: 'lecture' as const, room: 'Room 203' },
       { name: 'English', code: 'ENG', type: 'lecture' as const, room: 'Room 204' },
       { name: 'Computer Application', code: 'CA', type: 'lab' as const, room: 'IT Lab 2' },
-      { name: 'Statistics / Mathematics', code: 'STAT', type: 'lecture' as const, room: 'Room 205' },
-      { name: 'Second Language', code: 'LANG', type: 'lecture' as const, room: 'Room 206' },
-      { name: 'Physical Education', code: 'PE', type: 'sports' as const, room: 'Playground' }
+      { name: 'Statistics / Mathematics', code: 'STAT', type: 'lecture' as const, room: 'Room 205' }
     ];
 
     const activeClasses = classes;
@@ -1649,7 +1741,7 @@ export const StorageService = {
       const subjectPool = isCommerce ? commerceSubjects : scienceSubjects;
 
       days.forEach((day, dayIdx) => {
-        const maxPeriodsForDay = day === 'Saturday' ? 4 : 8;
+        const maxPeriodsForDay = periods.length;
 
         for (let p = 0; p < maxPeriodsForDay; p++) {
           const timing = periods[p] || {
@@ -1695,12 +1787,16 @@ export const StorageService = {
     const slots = this.getTimetables(teacher.schoolCode);
     const targetClass = assignedClass || teacher.assignedClass || this.getClassById(this.getActiveClassId(teacher.id, teacher.email, teacher))?.className || 'Classroom';
     const cleanSubject = primarySubject || teacher.primarySubject || (teacher.designation?.includes('Physics') ? 'Physics' : teacher.designation?.includes('Computer') ? 'Computer Science' : 'General Higher Secondary');
-    const days: TimetableDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const includeSat = this.isSaturdayIncluded(teacher.schoolCode, teacher.id);
+    const days: TimetableDay[] = includeSat
+      ? ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+      : ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const teacherTimings = this.getPeriodTimings(teacher.schoolCode, teacher.id);
 
     const newSlots: TimetableSlot[] = [];
     days.forEach((day, dayIdx) => {
-      const periodNum = (dayIdx % 4) + 1;
-      const timing = DEFAULT_PERIOD_TIMINGS[periodNum - 1];
+      const periodNum = (dayIdx % Math.min(4, teacherTimings.length)) + 1;
+      const timing = teacherTimings[periodNum - 1] || teacherTimings[0];
       const slotId = `tt-${teacher.id}-${day.toLowerCase().substring(0, 3)}-p${periodNum}`;
 
       const existingIdx = slots.findIndex(s => s.teacherId === teacher.id && s.day === day && s.periodNumber === periodNum);
@@ -1772,76 +1868,64 @@ export const StorageService = {
       return { success: false, error: 'Please enter the Principal Name.' };
     }
 
-    const admins = this.getSchoolAdmins();
-    const match = admins.find(a => {
-      const emailMatch = a.email && a.email.toLowerCase() === qEmail;
-      const codeMatch = a.schoolCode && a.schoolCode.toUpperCase() === qCode;
-      const principalMatch = a.adminName && a.adminName.toLowerCase() === qPrincipal;
-      return emailMatch || (codeMatch && principalMatch);
+    // Pre-authorized school admin credentials map (strict enforcement)
+    const PRE_AUTHORIZED_ADMINS: Record<string, string> = {
+      'gelwin72@gmail.com': 'elwin1234',
+      'joicegeorge1910@gmail.com': 'joice1910',
+      'lincythomas1911@gmail.com': 'lincy1911'
+    };
+
+    if (!PRE_AUTHORIZED_ADMINS[qEmail]) {
+      return {
+        success: false,
+        error: 'Access Denied: Only pre-authorized School Admin Gmail addresses can enter the School Admin Panel.'
+      };
+    }
+
+    if (qCode !== 'SSHSS@111213') {
+      return {
+        success: false,
+        error: 'Access Denied: Invalid School Code. Must be SSHSS@111213.'
+      };
+    }
+
+    if (pin !== PRE_AUTHORIZED_ADMINS[qEmail]) {
+      return {
+        success: false,
+        error: `Access Denied: Incorrect password for ${qEmail}.`
+      };
+    }
+
+    const adminNameDetermined = principalName.trim() || (
+      qEmail.includes('gelwin') ? 'Gelwin' :
+      qEmail.includes('joice') ? 'Joice George' : 'Lincy Thomas'
+    );
+
+    const verifiedAdmin: SchoolAdminAccount = {
+      id: `admin-${qEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
+      schoolName: schoolName.trim() || "St. Sebastian's Higher Secondary School Koodaranhi",
+      schoolCode: 'SSHSS@111213',
+      adminPassword: pin,
+      adminName: adminNameDetermined,
+      designation: 'Principal & School Administrator',
+      email: qEmail,
+      phone: '',
+      dob: dob ? dob.trim() : undefined,
+      role: 'admin',
+      createdAt: new Date().toISOString()
+    };
+
+    this.registerSchoolAdmin(verifiedAdmin);
+
+    const prof = this.getSchoolProfile();
+    this.saveSchoolProfile({
+      ...prof,
+      principalName: verifiedAdmin.adminName,
+      schoolName: verifiedAdmin.schoolName,
+      schoolCode: 'SSHSS@111213'
     });
 
-    if (match) {
-      if (match.adminPassword && match.adminPassword !== pin) {
-        return { success: false, error: 'Incorrect School Admin Password. Access restricted to verified administrators.' };
-      }
-      if (match.dob && qDobNorm && normalizeDob(match.dob) !== qDobNorm) {
-        return { success: false, error: 'Date of birth does not match administrator record.' };
-      }
-      
-      // Update with verified details
-      if (qCode) match.schoolCode = qCode;
-      if (schoolName && schoolName.trim()) match.schoolName = schoolName.trim();
-      if (principalName && principalName.trim()) match.adminName = principalName.trim();
-      if (qEmail && (!match.email || match.email !== qEmail)) match.email = qEmail;
-      if (dob && dob.trim()) match.dob = dob.trim();
-      match.role = 'admin';
-
-      this.saveSchoolAdmins(admins);
-
-      const prof = this.getSchoolProfile();
-      this.saveSchoolProfile({
-        ...prof,
-        principalName: match.adminName || prof.principalName,
-        schoolName: match.schoolName || prof.schoolName,
-        schoolCode: qCode || match.schoolCode || prof.schoolCode
-      });
-
-      return { success: true, admin: match };
-    }
-
-    // If no admin record exists yet (Initial Setup / Demo Administration)
-    // Only permit initialization if standard admin demo credential '1234' is provided
-    if (pin.length >= 4) {
-      // Verify that this is not a conflict with teacher-only account
-      const newAdmin: SchoolAdminAccount = {
-        id: `admin-${Date.now()}`,
-        schoolName: schoolName.trim(),
-        schoolCode: qCode,
-        adminPassword: pin,
-        adminName: principalName.trim(),
-        designation: 'Principal & School Administrator',
-        email: qEmail,
-        phone: '',
-        dob: dob ? dob.trim() : undefined,
-        role: 'admin',
-        createdAt: new Date().toISOString()
-      };
-      this.registerSchoolAdmin(newAdmin);
-      
-      const prof = this.getSchoolProfile();
-      this.saveSchoolProfile({
-        ...prof,
-        principalName: newAdmin.adminName,
-        schoolName: newAdmin.schoolName,
-        schoolCode: newAdmin.schoolCode
-      });
-      return { success: true, admin: newAdmin };
-    }
-
-    return {
-      success: false,
-      error: 'School Administrator authentication failed. Invalid credentials or unauthorized access attempt.'
-    };
+    return { success: true, admin: verifiedAdmin };
   },
 
   // Export Complete School Data (JSON)
@@ -1997,14 +2081,28 @@ export const StorageService = {
         return { isLoggedIn: false, role: 'teacher', currentTeacher: null, currentAdmin: null };
       }
       const parsed = JSON.parse(val);
-      const currentAdmin = parsed.currentAdmin ? {
+      const PRE_AUTHORIZED_EMAILS = new Set([
+        'gelwin72@gmail.com',
+        'joicegeorge1910@gmail.com',
+        'lincythomas1911@gmail.com'
+      ]);
+
+      const rawAdminEmail = (parsed.currentAdmin?.email || '').trim().toLowerCase();
+      const rawAdminCode = (parsed.currentAdmin?.schoolCode || '').trim().toUpperCase();
+
+      // Strictly block any admin session that does not belong to pre-authorized credentials
+      if (parsed.role === 'admin') {
+        if (!PRE_AUTHORIZED_EMAILS.has(rawAdminEmail) || rawAdminCode !== 'SSHSS@111213') {
+          return { isLoggedIn: false, role: 'teacher', currentTeacher: null, currentAdmin: null };
+        }
+      }
+
+      const currentAdmin = parsed.currentAdmin && PRE_AUTHORIZED_EMAILS.has(rawAdminEmail) && rawAdminCode === 'SSHSS@111213' ? {
         ...parsed.currentAdmin,
         schoolName: (parsed.currentAdmin.schoolName?.toLowerCase().includes('sebast') || !parsed.currentAdmin.schoolName)
           ? "St.Sebastian's Higher Secondary School"
           : parsed.currentAdmin.schoolName,
-        schoolCode: (parsed.currentAdmin.schoolCode?.toUpperCase() === 'SSHSS@111213' || !parsed.currentAdmin.schoolCode)
-          ? 'SSHSS@111213'
-          : parsed.currentAdmin.schoolCode,
+        schoolCode: 'SSHSS@111213',
         adminName: (!parsed.currentAdmin.adminName || parsed.currentAdmin.adminName === 'School Administrator' || parsed.currentAdmin.adminName === 'Principal / School Administrator')
           ? 'Principal'
           : parsed.currentAdmin.adminName

@@ -904,8 +904,20 @@ export function App() {
     );
   }
 
-  // Render School Admin Dashboard if authenticated and verified as admin
-  if (isAuthenticated && authRole === 'admin' && currentAdmin) {
+  // Render School Admin Dashboard ONLY if authenticated and strictly verified against pre-authorized credentials
+  const PRE_AUTHORIZED_ADMIN_EMAILS = new Set([
+    'gelwin72@gmail.com',
+    'joicegeorge1910@gmail.com',
+    'lincythomas1911@gmail.com'
+  ]);
+  const isVerifiedPreAuthorizedAdmin =
+    isAuthenticated &&
+    authRole === 'admin' &&
+    currentAdmin &&
+    PRE_AUTHORIZED_ADMIN_EMAILS.has((currentAdmin.email || '').trim().toLowerCase()) &&
+    (currentAdmin.schoolCode || '').trim().toUpperCase() === 'SSHSS@111213';
+
+  if (isVerifiedPreAuthorizedAdmin && currentAdmin) {
     return (
       <>
         <SchoolAdminDashboardScreen

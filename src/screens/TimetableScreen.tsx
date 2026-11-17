@@ -7,31 +7,21 @@ import {
   Trash2,
   Printer,
   Sparkles,
-  BookOpen,
-  Users,
   Building2,
   Calendar,
   CheckCircle2,
-  AlertCircle,
   X,
   Save,
-  Filter,
-  Layers,
-  ChevronRight,
-  School,
-  FileSpreadsheet,
-  Download,
-  Info,
   MapPin,
-  RefreshCw,
   Award,
   SlidersHorizontal,
-  Flame
+  RotateCcw
 } from 'lucide-react';
 import {
   TimetableSlot,
   TimetableDay,
   TimetablePeriodType,
+  PeriodTimingConfig,
   SchoolProfile,
   ClassInfo,
   ClassItem,
@@ -41,8 +31,10 @@ import {
 import {
   StorageService,
   DEFAULT_PERIOD_TIMINGS,
-  TIMETABLE_DAYS
+  TIMETABLE_DAYS,
+  registerStorageMutationListener
 } from '../utils/storage';
+import { CloudSync } from '../utils/cloudSync';
 
 interface TimetableScreenProps {
   school: SchoolProfile;
@@ -51,6 +43,65 @@ interface TimetableScreenProps {
   teacher: TeacherInfo;
   activeClassId?: string;
 }
+
+// Convert "09:30 AM" or "02:10 PM" -> "09:30" or "14:10" for <input type="time">
+const to24HourTime = (timeStr?: string): string => {
+  if (!timeStr) return '09:30';
+  const trimmed = timeStr.trim();
+  // Already 24h HH:MM
+  if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
+    const [h, m] = trimmed.split(':').map(Number);
+    if (!isNaN(h) && !isNaN(m)) {
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+  }
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (match) {
+    let hours = parseInt(match[1], 10);
+    const minutes = match[2];
+    const modifier = match[3].toUpperCase();
+    if (modifier === 'PM' && hours < 12) hours += 12;
+    if (modifier === 'AM' && hours === 12) hours = 0;
+    return `${String(hours).padStart(2, '0')}:${minutes}`;
+  }
+  return '09:30';
+};
+
+// Convert "14:10" -> "02:10 PM" for display & storage
+const to12HourTime = (time24?: string): string => {
+  if (!time24) return '09:30 AM';
+  const trimmed = time24.trim();
+  if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  const parts = trimmed.split(':');
+  if (parts.length !== 2) return trimmed;
+  let hours = parseInt(parts[0], 10);
+  const minutes = parseInt(parts[1], 10);
+  if (isNaN(hours) || isNaN(minutes)) return trimmed;
+  const modifier = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')} ${modifier}`;
+};
+
+// Convert "09:30 AM" or "14:10" -> total minutes from midnight
+const parseTimeToMinutes = (timeStr: string): number => {
+  try {
+    const trimmed = (timeStr || '').trim();
+    const parts = trimmed.split(/\s+/);
+    const [hRaw, mRaw] = parts[0].split(':').map(Number);
+    let hours = hRaw;
+    const minutes = mRaw || 0;
+    const modifier = parts[1]?.toUpperCase();
+    if (modifier === 'PM' && hours < 12) hours += 12;
+    if (modifier === 'AM' && hours === 12) hours = 0;
+    if (isNaN(hours) || isNaN(minutes)) return 0;
+    return hours * 60 + minutes;
+  } catch {
+    return 0;
+  }
+};
 
 export const TimetableScreen: React.FC<TimetableScreenProps> = ({
   school,
@@ -71,11 +122,31 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('ALL');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Storage data state
+  // Storage data & teacher preferences state
   const [timetables, setTimetables] = useState<TimetableSlot[]>(() => StorageService.getTimetables(schoolCode));
-  const [teachersList] = useState<TeacherAccount[]>(() => StorageService.getTeachersBySchoolCode(schoolCode));
+  const [periodTimings, setPeriodTimings] = useState<PeriodTimingConfig[]>(() =>
+    StorageService.getPeriodTimings(schoolCode, activeTeacherId)
+  );
+  const [includeSaturday, setIncludeSaturday] = useState<boolean>(() =>
+    StorageService.isSaturdayIncluded(schoolCode, activeTeacherId)
+  );
 
-  // Edit / Add Modal State
+  // Sync with storage / cloud updates
+  useEffect(() => {
+    const unsubscribe = registerStorageMutationListener(() => {
+      setTimetables(StorageService.getTimetables(schoolCode));
+      setPeriodTimings(StorageService.getPeriodTimings(schoolCode, activeTeacherId));
+      setIncludeSaturday(StorageService.isSaturdayIncluded(schoolCode, activeTeacherId));
+    });
+    return unsubscribe;
+  }, [schoolCode, activeTeacherId]);
+
+  // Active days: Monday to Friday by default; Saturday added only if teacher enables it
+  const activeDays = useMemo<TimetableDay[]>(() => {
+    return includeSaturday ? [...TIMETABLE_DAYS, 'Saturday'] : [...TIMETABLE_DAYS];
+  }, [includeSaturday]);
+
+  // Edit / Add Slot Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSlot, setEditingSlot] = useState<TimetableSlot | null>(null);
   const [formData, setFormData] = useState<{
@@ -92,8 +163,8 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
   }>({
     day: 'Monday',
     periodNumber: 1,
-    startTime: '09:30 AM',
-    endTime: '10:15 AM',
+    startTime: periodTimings[0]?.startTime || '09:30 AM',
+    endTime: periodTimings[0]?.endTime || '10:15 AM',
     subject: 'Physics',
     subjectCode: 'PHY',
     className: classInfo.className || (classesList.find(c => c.id === activeClassId)?.className) || '',
@@ -101,6 +172,10 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     type: 'lecture',
     notes: ''
   });
+
+  // Set Period Timings Modal State
+  const [isTimingsModalOpen, setIsTimingsModalOpen] = useState(false);
+  const [draftTimings, setDraftTimings] = useState<PeriodTimingConfig[]>(periodTimings);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -112,9 +187,74 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     setTimetables(updated);
   };
 
-  // Filter slots based on active view mode
+  const handleToggleSaturday = () => {
+    const nextVal = !includeSaturday;
+    setIncludeSaturday(nextVal);
+    StorageService.setSaturdayIncluded(nextVal, schoolCode, activeTeacherId);
+    if (!nextVal && selectedDay === 'Saturday') {
+      setSelectedDay('ALL');
+    }
+    showToast(
+      nextVal
+        ? 'Saturday added to your weekly timetable!'
+        : 'Saturday removed from your weekly timetable (Monday–Friday active).'
+    );
+  };
+
+  const handleOpenTimingsModal = () => {
+    setDraftTimings(periodTimings.map(p => ({ ...p })));
+    setIsTimingsModalOpen(true);
+  };
+
+  const handleUpdateDraftTiming = (
+    periodNumber: number,
+    field: 'startTime' | 'endTime',
+    value24: string
+  ) => {
+    const formatted12 = to12HourTime(value24);
+    setDraftTimings(prev =>
+      prev.map(p =>
+        p.periodNumber === periodNumber
+          ? { ...p, [field]: formatted12 }
+          : p
+      )
+    );
+  };
+
+  const handleResetDefaultTimings = () => {
+    setDraftTimings(DEFAULT_PERIOD_TIMINGS.map(p => ({ ...p })));
+  };
+
+  const handleSavePeriodTimings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    for (const p of draftTimings) {
+      const startMins = parseTimeToMinutes(p.startTime);
+      const endMins = parseTimeToMinutes(p.endTime);
+      if (endMins <= startMins) {
+        showToast(`${p.label}: End time must be after start time`);
+        return;
+      }
+    }
+
+    StorageService.savePeriodTimings(draftTimings, schoolCode, activeTeacherId);
+    setPeriodTimings(draftTimings);
+    const updatedSlots = StorageService.getTimetables(schoolCode);
+    setTimetables(updatedSlots);
+
+    if (schoolCode && activeTeacherId) {
+      const myUpdatedSlots = updatedSlots.filter(s => s.teacherId === activeTeacherId);
+      for (const s of myUpdatedSlots) {
+        CloudSync.saveTimetableSlotToSchool(schoolCode, s).catch(() => {});
+      }
+    }
+
+    setIsTimingsModalOpen(false);
+    showToast('Period start & end times saved successfully!');
+  };
+
+  // Filter slots based on active view mode & active days
   const displayedSlots = useMemo(() => {
-    let slots = [...timetables];
+    let slots = timetables.filter(s => activeDays.includes(s.day));
 
     if (viewMode === 'teacher-schedule') {
       slots = slots.filter(s => s.teacherId === activeTeacherId || s.teacherName === teacher.teacherName);
@@ -132,17 +272,34 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     }
 
     return slots;
-  }, [timetables, viewMode, activeTeacherId, teacher.teacherName, classInfo.className, selectedClassFilter, selectedDay]);
+  }, [
+    timetables,
+    activeDays,
+    viewMode,
+    activeTeacherId,
+    teacher.teacherName,
+    classInfo.className,
+    selectedClassFilter,
+    selectedDay
+  ]);
 
   // Workload Statistics for current teacher
   const teacherStats = useMemo(() => {
-    const teacherSlots = timetables.filter(s => s.teacherId === activeTeacherId || s.teacherName === teacher.teacherName);
+    const teacherSlots = timetables.filter(
+      s => (s.teacherId === activeTeacherId || s.teacherName === teacher.teacherName) && activeDays.includes(s.day)
+    );
     const totalPeriods = teacherSlots.length;
-    const estimatedHours = (totalPeriods * 45) / 60; // 45 mins per period
+    const totalMinutes = teacherSlots.reduce((acc, s) => {
+      const diff = parseTimeToMinutes(s.endTime) - parseTimeToMinutes(s.startTime);
+      return acc + (diff > 0 ? diff : 45);
+    }, 0);
+    const estimatedHours = totalMinutes / 60;
 
     // Distribution by day
     const dayCounts: Record<string, number> = {};
-    TIMETABLE_DAYS.forEach(d => { dayCounts[d] = 0; });
+    activeDays.forEach(d => {
+      dayCounts[d] = 0;
+    });
     teacherSlots.forEach(s => {
       dayCounts[s.day] = (dayCounts[s.day] || 0) + 1;
     });
@@ -156,33 +313,42 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
       classesTaughtCount: classSet.size,
       dayCounts
     };
-  }, [timetables, activeTeacherId, teacher.teacherName]);
+  }, [timetables, activeTeacherId, teacher.teacherName, activeDays]);
 
   // Real-time "Current / Next Period" Indicator
   const currentPeriodStatus = useMemo(() => {
     const now = new Date();
     const days: TimetableDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const currentDayIndex = now.getDay(); // 0 is Sunday, 1 is Mon...
+    const currentDayIndex = now.getDay(); // 0 is Sunday, 1 is Mon, ..., 6 is Sat
     if (currentDayIndex === 0) {
-      return { isWeekend: true, label: 'Sunday - Weekly Holiday', activeSlot: null, nextSlot: null };
+      return {
+        isWeekend: true,
+        isSaturdayDisabled: false,
+        todayName: 'Sunday',
+        label: 'Sunday - Weekly Holiday',
+        activeSlot: null,
+        nextSlot: null,
+        totalToday: 0
+      };
     }
     const todayName = days[currentDayIndex - 1];
-    const todaySlots = displayedSlots.filter(s => s.day === todayName).sort((a, b) => a.periodNumber - b.periodNumber);
+    if (todayName === 'Saturday' && !includeSaturday) {
+      return {
+        isWeekend: true,
+        isSaturdayDisabled: true,
+        todayName: 'Saturday',
+        label: 'Saturday - Off (Optional Day Disabled)',
+        activeSlot: null,
+        nextSlot: null,
+        totalToday: 0
+      };
+    }
+
+    const todaySlots = displayedSlots
+      .filter(s => s.day === todayName)
+      .sort((a, b) => a.periodNumber - b.periodNumber);
 
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    // Helper to convert "09:30 AM" to minutes
-    const parseTimeToMinutes = (timeStr: string) => {
-      try {
-        const [time, modifier] = timeStr.trim().split(' ');
-        let [hours, minutes] = time.split(':').map(Number);
-        if (modifier === 'PM' && hours < 12) hours += 12;
-        if (modifier === 'AM' && hours === 12) hours = 0;
-        return hours * 60 + minutes;
-      } catch {
-        return 0;
-      }
-    };
 
     let activeSlot: TimetableSlot | null = null;
     let nextSlot: TimetableSlot | null = null;
@@ -199,24 +365,31 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
 
     return {
       isWeekend: false,
+      isSaturdayDisabled: false,
       todayName,
+      label: todayName,
       activeSlot,
       nextSlot,
       totalToday: todaySlots.length
     };
-  }, [displayedSlots]);
+  }, [displayedSlots, includeSaturday]);
 
   const handleOpenAddModal = (day?: TimetableDay, periodNum?: number) => {
     const targetPeriod = periodNum || 1;
-    const timing = DEFAULT_PERIOD_TIMINGS[targetPeriod - 1] || DEFAULT_PERIOD_TIMINGS[0];
+    const timing = periodTimings[targetPeriod - 1] || periodTimings[0] || DEFAULT_PERIOD_TIMINGS[0];
+    const validDay = day && activeDays.includes(day) ? day : 'Monday';
 
     setEditingSlot(null);
     setFormData({
-      day: day || 'Monday',
+      day: validDay,
       periodNumber: targetPeriod,
       startTime: timing.startTime,
       endTime: timing.endTime,
-      subject: teacher.designation?.includes('Physics') ? 'Physics' : teacher.designation?.includes('Computer') ? 'Computer Science' : 'General Higher Secondary',
+      subject: teacher.designation?.includes('Physics')
+        ? 'Physics'
+        : teacher.designation?.includes('Computer')
+        ? 'Computer Science'
+        : 'General Higher Secondary',
       subjectCode: 'GEN',
       className: classInfo.className || (classesList.find(c => c.id === activeClassId)?.className) || '',
       roomNumber: 'Room 101',
@@ -250,7 +423,18 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
       return;
     }
 
-    const timing = DEFAULT_PERIOD_TIMINGS[formData.periodNumber - 1] || DEFAULT_PERIOD_TIMINGS[0];
+    const timing = periodTimings[formData.periodNumber - 1] || periodTimings[0] || DEFAULT_PERIOD_TIMINGS[0];
+    const startMins = parseTimeToMinutes(formData.startTime || timing.startTime);
+    const endMins = parseTimeToMinutes(formData.endTime || timing.endTime);
+    if (endMins <= startMins) {
+      showToast('Period end time must be after start time');
+      return;
+    }
+
+    if (formData.day === 'Saturday' && !includeSaturday) {
+      setIncludeSaturday(true);
+      StorageService.setSaturdayIncluded(true, schoolCode, activeTeacherId);
+    }
 
     const slotPayload: TimetableSlot = {
       id: editingSlot ? editingSlot.id : `tt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -274,6 +458,9 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     };
 
     StorageService.saveTimetableSlot(slotPayload);
+    if (schoolCode) {
+      CloudSync.saveTimetableSlotToSchool(schoolCode, slotPayload).catch(() => {});
+    }
     refreshTimetables();
     setIsModalOpen(false);
     showToast(editingSlot ? 'Period slot updated successfully!' : 'New period scheduled successfully!');
@@ -281,6 +468,9 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
 
   const handleDeleteSlot = (slotId: string) => {
     StorageService.deleteTimetableSlot(slotId);
+    if (schoolCode) {
+      CloudSync.deleteTimetableSlotFromSchool(schoolCode, slotId).catch(() => {});
+    }
     refreshTimetables();
     setIsModalOpen(false);
     showToast('Period removed from schedule.');
@@ -301,7 +491,12 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
       createdAt: new Date().toISOString()
     };
 
-    StorageService.generateTeacherStandardTimetable(sampleTeacher, classInfo.className);
+    const generated = StorageService.generateTeacherStandardTimetable(sampleTeacher, classInfo.className);
+    if (schoolCode) {
+      generated.forEach(s => {
+        CloudSync.saveTimetableSlotToSchool(schoolCode, s).catch(() => {});
+      });
+    }
     refreshTimetables();
     showToast('Weekly timetable template automatically generated and saved!');
   };
@@ -331,7 +526,7 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
               Weekly Timetable & Period Planner
             </h2>
             <p className="text-xs sm:text-sm text-slate-300 max-w-2xl">
-              Organize daily periods, laboratory hours, and subject allocations. Synced automatically with School Administration.
+              6-period Monday–Friday schedule by default. Set individual start/end times for each period or optionally enable Saturday anytime.
             </p>
           </div>
 
@@ -339,10 +534,36 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
+              id="btn-set-period-timings"
+              onClick={handleOpenTimingsModal}
+              className="px-3.5 py-2 rounded-xl bg-[#0F1115] hover:bg-[#252830] border border-amber-500/40 text-amber-300 hover:text-amber-200 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+              title="Set start and end time for each period individually"
+            >
+              <SlidersHorizontal className="w-4 h-4 text-amber-400" />
+              <span>Set Period Timings</span>
+            </button>
+
+            <button
+              type="button"
+              id="btn-toggle-saturday"
+              onClick={handleToggleSaturday}
+              className={`px-3.5 py-2 rounded-xl border text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm ${
+                includeSaturday
+                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'bg-[#0F1115] hover:bg-[#252830] border-[#2D3139] text-slate-300 hover:text-white'
+              }`}
+              title={includeSaturday ? 'Click to remove Saturday from timetable' : 'Click to add Saturday to timetable'}
+            >
+              <Calendar className={`w-4 h-4 ${includeSaturday ? 'text-emerald-400' : 'text-purple-400'}`} />
+              <span>{includeSaturday ? 'Saturday Added (Remove)' : '+ Add Saturday'}</span>
+            </button>
+
+            <button
+              type="button"
               id="btn-auto-schedule-template"
               onClick={handleAutoGenerateMyTimetable}
               className="px-3.5 py-2 rounded-xl bg-[#0F1115] hover:bg-[#252830] border border-[#2D3139] text-purple-300 hover:text-purple-200 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
-              title="Pre-fill standard 8-period Higher Secondary schedule"
+              title="Pre-fill standard 6-period Higher Secondary schedule"
             >
               <Sparkles className="w-4 h-4 text-purple-400" />
               <span>Auto-Fill Schedule</span>
@@ -400,7 +621,11 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
             <span className="text-[11px] font-semibold text-slate-400 block">Active Status</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
               <span className="text-xs font-bold text-amber-300 truncate">
-                {currentPeriodStatus.activeSlot ? `Period ${currentPeriodStatus.activeSlot.periodNumber} (${currentPeriodStatus.activeSlot.subject})` : 'Free / Break'}
+                {currentPeriodStatus.isWeekend
+                  ? currentPeriodStatus.label
+                  : currentPeriodStatus.activeSlot
+                  ? `Period ${currentPeriodStatus.activeSlot.periodNumber} (${currentPeriodStatus.activeSlot.subject})`
+                  : 'Free / Break'}
               </span>
             </div>
           </div>
@@ -489,7 +714,7 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
             >
               All Days
             </button>
-            {TIMETABLE_DAYS.map(day => (
+            {activeDays.map(day => (
               <button
                 key={day}
                 type="button"
@@ -510,40 +735,57 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
       {/* VIEW MODE 1 & 2: MASTER WEEKLY GRID VIEW */}
       {(viewMode === 'teacher-schedule' || viewMode === 'class-schedule') && (
         <div className="rounded-3xl bg-[#1A1C23] border border-[#2D3139] p-4 sm:p-6 shadow-xl overflow-hidden space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-purple-400" />
-                {viewMode === 'teacher-schedule' ? `Weekly Schedule: ${teacher.teacherName || currentTeacher?.name}` : `Master Classroom Timetable: ${selectedClassFilter === 'ALL' ? classInfo.className : selectedClassFilter}`}
+                {viewMode === 'teacher-schedule'
+                  ? `Weekly Schedule: ${teacher.teacherName || currentTeacher?.name}`
+                  : `Master Classroom Timetable: ${selectedClassFilter === 'ALL' ? classInfo.className : selectedClassFilter}`}
               </h3>
               <span className="text-xs font-semibold text-slate-400">
                 ({displayedSlots.length} periods active)
               </span>
             </div>
-            <span className="text-[11px] font-medium text-slate-400 hidden sm:inline">
-              Click any cell to edit or schedule period
-            </span>
+            <button
+              type="button"
+              onClick={handleOpenTimingsModal}
+              className="text-[11px] font-semibold text-amber-300 hover:text-amber-200 flex items-center gap-1 cursor-pointer"
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>Click any period time header to customize start & end times</span>
+            </button>
           </div>
 
           {/* Timetable Weekly Matrix Table */}
           <div className="overflow-x-auto border border-[#2D3139] rounded-2xl">
-            <table className="w-full text-left text-xs border-collapse min-w-[760px]">
+            <table className="w-full text-left text-xs border-collapse min-w-[700px]">
               <thead>
                 <tr className="bg-[#0F1115] border-b border-[#2D3139] text-slate-400 font-bold">
                   <th className="p-3.5 w-24 text-center border-r border-[#2D3139]">DAY</th>
-                  {DEFAULT_PERIOD_TIMINGS.map(p => (
-                    <th key={p.periodNumber} className="p-2.5 text-center border-r border-[#2D3139] last:border-r-0">
-                      <span className="text-white font-extrabold block">{p.label}</span>
-                      <span className="text-[10px] text-slate-400 font-mono block mt-0.5">{p.startTime} - {p.endTime}</span>
+                  {periodTimings.map(p => (
+                    <th
+                      key={p.periodNumber}
+                      onClick={handleOpenTimingsModal}
+                      title="Click to edit start and end time for this period"
+                      className="p-2.5 text-center border-r border-[#2D3139] last:border-r-0 cursor-pointer hover:bg-[#1A1C23] transition group"
+                    >
+                      <span className="text-white font-extrabold flex items-center justify-center gap-1">
+                        {p.label}
+                        <Edit3 className="w-2.5 h-2.5 text-slate-500 group-hover:text-amber-400 transition" />
+                      </span>
+                      <span className="text-[10px] text-amber-300/90 font-mono block mt-0.5">
+                        {p.startTime} - {p.endTime}
+                      </span>
                       {p.isBreakAfter && (
-                        <span className="text-[9px] text-amber-400/90 font-semibold block">{p.breakLabel}</span>
+                        <span className="text-[9px] text-slate-400 font-semibold block">{p.breakLabel}</span>
                       )}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#2D3139]">
-                {TIMETABLE_DAYS.filter(d => selectedDay === 'ALL' || selectedDay === d).map(day => (
+                {activeDays.filter(d => selectedDay === 'ALL' || selectedDay === d).map(day => (
                   <tr key={day} className="hover:bg-[#222530]/40 transition">
                     {/* Day Column */}
                     <td className="p-3 text-center font-extrabold text-purple-300 bg-[#0F1115]/60 border-r border-[#2D3139]">
@@ -553,8 +795,8 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                       </span>
                     </td>
 
-                    {/* 8 Period Columns */}
-                    {DEFAULT_PERIOD_TIMINGS.map(timing => {
+                    {/* 6 Period Columns */}
+                    {periodTimings.map(timing => {
                       const slot = displayedSlots.find(s => s.day === day && s.periodNumber === timing.periodNumber);
 
                       if (slot) {
@@ -591,6 +833,10 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                                   </span>
                                 )}
                               </div>
+
+                              <span className="text-[9px] text-slate-400 font-mono block">
+                                {slot.startTime} - {slot.endTime}
+                              </span>
 
                               {viewMode === 'class-schedule' && slot.teacherName && (
                                 <span className="text-[10px] text-slate-400 block truncate">
@@ -639,111 +885,239 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                 </span>
               </div>
               <h3 className="text-lg font-black text-white mt-1">
-                Day Schedule & Current Teaching Status
+                {currentPeriodStatus.isWeekend
+                  ? currentPeriodStatus.label
+                  : 'Day Schedule & Current Teaching Status'}
               </h3>
               <p className="text-xs text-slate-300 mt-0.5">
-                Real-time tracking of periods, room venues, and teaching notes for today.
+                {currentPeriodStatus.isSaturdayDisabled
+                  ? 'Saturday is currently off in your timetable. You can enable Saturday anytime if needed.'
+                  : currentPeriodStatus.isWeekend
+                  ? 'Sunday is a weekly holiday. Timetable runs Monday to Friday.'
+                  : 'Real-time tracking of periods, room venues, and teaching notes for today.'}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => handleOpenAddModal(currentPeriodStatus.todayName as TimetableDay)}
-              className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer shadow-lg shadow-purple-950/50"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Period for Today</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {currentPeriodStatus.isSaturdayDisabled && (
+                <button
+                  type="button"
+                  onClick={handleToggleSaturday}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Saturday</span>
+                </button>
+              )}
+
+              {!currentPeriodStatus.isWeekend && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenAddModal(currentPeriodStatus.todayName as TimetableDay)}
+                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer shadow-lg shadow-purple-950/50"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Period for Today</span>
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Timeline Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            {DEFAULT_PERIOD_TIMINGS.map(timing => {
-              const currentDay = (currentPeriodStatus.todayName || 'Monday') as TimetableDay;
-              const slot = displayedSlots.find(s => s.day === currentDay && s.periodNumber === timing.periodNumber);
-              const isCurrent = currentPeriodStatus.activeSlot?.periodNumber === timing.periodNumber;
+          {/* Timeline Cards (Shown when today is an active school day) */}
+          {!currentPeriodStatus.isWeekend && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {periodTimings.map(timing => {
+                const currentDay = (currentPeriodStatus.todayName || 'Monday') as TimetableDay;
+                const slot = displayedSlots.find(s => s.day === currentDay && s.periodNumber === timing.periodNumber);
+                const isCurrent = currentPeriodStatus.activeSlot?.periodNumber === timing.periodNumber;
 
-              return (
-                <div
-                  key={timing.periodNumber}
-                  className={`p-4 rounded-2xl border transition relative ${
-                    isCurrent
-                      ? 'bg-purple-600/15 border-purple-500 shadow-lg shadow-purple-950/50 ring-1 ring-purple-500/40'
-                      : slot
-                      ? 'bg-[#1A1C23] border-[#2D3139] hover:border-slate-600'
-                      : 'bg-[#0F1115] border-[#2D3139]/60 opacity-70'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm ${
-                        isCurrent
-                          ? 'bg-purple-600 text-white'
-                          : slot
-                          ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                          : 'bg-[#1A1C23] text-slate-500 border border-[#2D3139]'
-                      }`}>
-                        P{timing.periodNumber}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className="text-sm font-bold text-white">
-                            {slot ? slot.subject : 'Free Period / Break'}
-                          </h4>
-                          {isCurrent && (
-                            <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white text-[9px] font-black uppercase tracking-wider animate-pulse">
-                              🔴 LIVE NOW
-                            </span>
-                          )}
+                return (
+                  <div
+                    key={timing.periodNumber}
+                    className={`p-4 rounded-2xl border transition relative ${
+                      isCurrent
+                        ? 'bg-purple-600/15 border-purple-500 shadow-lg shadow-purple-950/50 ring-1 ring-purple-500/40'
+                        : slot
+                        ? 'bg-[#1A1C23] border-[#2D3139] hover:border-slate-600'
+                        : 'bg-[#0F1115] border-[#2D3139]/60 opacity-70'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm ${
+                          isCurrent
+                            ? 'bg-purple-600 text-white'
+                            : slot
+                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                            : 'bg-[#1A1C23] text-slate-500 border border-[#2D3139]'
+                        }`}>
+                          P{timing.periodNumber}
                         </div>
-                        <span className="text-xs text-slate-400 font-mono flex items-center gap-1 mt-0.5">
-                          <Clock className="w-3 h-3 text-purple-400" />
-                          {timing.startTime} - {timing.endTime}
-                        </span>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-bold text-white">
+                              {slot ? slot.subject : 'Free Period / Break'}
+                            </h4>
+                            {isCurrent && (
+                              <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white text-[9px] font-black uppercase tracking-wider animate-pulse">
+                                🔴 LIVE NOW
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-xs text-slate-400 font-mono flex items-center gap-1 mt-0.5">
+                            <Clock className="w-3 h-3 text-purple-400" />
+                            {slot?.startTime || timing.startTime} - {slot?.endTime || timing.endTime}
+                          </span>
+                        </div>
                       </div>
+
+                      {slot ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditModal(slot)}
+                          className="p-1.5 rounded-lg bg-[#0F1115] hover:bg-[#252830] text-slate-300 hover:text-white border border-[#2D3139] transition cursor-pointer"
+                          title="Edit Period Slot"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAddModal(currentDay, timing.periodNumber)}
+                          className="px-2.5 py-1 rounded-lg bg-[#1A1C23] hover:bg-purple-600 text-slate-400 hover:text-white text-[11px] font-bold border border-[#2D3139] transition cursor-pointer"
+                        >
+                          + Schedule
+                        </button>
+                      )}
                     </div>
 
-                    {slot ? (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEditModal(slot)}
-                        className="p-1.5 rounded-lg bg-[#0F1115] hover:bg-[#252830] text-slate-300 hover:text-white border border-[#2D3139] transition cursor-pointer"
-                        title="Edit Period Slot"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenAddModal(currentDay, timing.periodNumber)}
-                        className="px-2.5 py-1 rounded-lg bg-[#1A1C23] hover:bg-purple-600 text-slate-400 hover:text-white text-[11px] font-bold border border-[#2D3139] transition cursor-pointer"
-                      >
-                        + Schedule
-                      </button>
+                    {slot && (
+                      <div className="mt-3 pt-3 border-t border-[#2D3139] flex flex-wrap items-center justify-between text-xs text-slate-300 gap-2">
+                        <span className="font-semibold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
+                          {slot.className}
+                        </span>
+                        {slot.roomNumber && (
+                          <span className="text-slate-400 flex items-center gap-1 font-mono">
+                            <MapPin className="w-3 h-3 text-purple-400" />
+                            {slot.roomNumber}
+                          </span>
+                        )}
+                        {slot.notes && (
+                          <p className="w-full text-xs text-slate-400 italic mt-1">
+                            "{slot.notes}"
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
-                  {slot && (
-                    <div className="mt-3 pt-3 border-t border-[#2D3139] flex flex-wrap items-center justify-between text-xs text-slate-300 gap-2">
-                      <span className="font-semibold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
-                        {slot.className}
-                      </span>
-                      {slot.roomNumber && (
-                        <span className="text-slate-400 flex items-center gap-1 font-mono">
-                          <MapPin className="w-3 h-3 text-purple-400" />
-                          {slot.roomNumber}
-                        </span>
-                      )}
-                      {slot.notes && (
-                        <p className="w-full text-xs text-slate-400 italic mt-1">
-                          "{slot.notes}"
-                        </p>
-                      )}
-                    </div>
-                  )}
+      {/* SET INDIVIDUAL PERIOD TIMINGS MODAL (PERIODS 1 TO 6) */}
+      {isTimingsModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#1A1C23] border border-[#2D3139] rounded-3xl w-full max-w-xl p-5 sm:p-6 shadow-2xl space-y-4 animate-scale-up my-auto">
+            <div className="flex items-center justify-between border-b border-[#2D3139] pb-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-5 h-5 text-amber-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    Set Period Start & End Times
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Configure when each of the 6 periods starts and ends individually.
+                  </p>
                 </div>
-              );
-            })}
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTimingsModalOpen(false)}
+                className="p-1.5 rounded-xl hover:bg-[#2D3139] text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePeriodTimings} className="space-y-3 text-xs">
+              <div className="space-y-2.5 max-h-[60vh] overflow-y-auto pr-1">
+                {draftTimings.map(p => (
+                  <div
+                    key={p.periodNumber}
+                    className="p-3 rounded-2xl bg-[#0F1115] border border-[#2D3139] grid grid-cols-1 sm:grid-cols-12 items-center gap-3"
+                  >
+                    <div className="sm:col-span-4 flex items-center gap-2.5">
+                      <span className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-500/30 text-purple-300 font-black flex items-center justify-center shrink-0">
+                        P{p.periodNumber}
+                      </span>
+                      <div>
+                        <span className="text-white font-bold block">{p.label}</span>
+                        <span className="text-[10px] text-amber-300 font-mono">
+                          {p.startTime} - {p.endTime}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-4">
+                      <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                        Start Time
+                      </label>
+                      <input
+                        type="time"
+                        required
+                        value={to24HourTime(p.startTime)}
+                        onChange={e => handleUpdateDraftTiming(p.periodNumber, 'startTime', e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-xl bg-[#1A1C23] border border-[#2D3139] text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-4">
+                      <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                        End Time
+                      </label>
+                      <input
+                        type="time"
+                        required
+                        value={to24HourTime(p.endTime)}
+                        onChange={e => handleUpdateDraftTiming(p.periodNumber, 'endTime', e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-xl bg-[#1A1C23] border border-[#2D3139] text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-[#2D3139]">
+                <button
+                  type="button"
+                  onClick={handleResetDefaultTimings}
+                  className="px-3 py-2 rounded-xl bg-[#0F1115] hover:bg-[#252830] border border-[#2D3139] text-slate-300 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Reset Defaults</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsTimingsModalOpen(false)}
+                    className="px-4 py-2 rounded-xl bg-[#2D3139] hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white text-xs font-extrabold shadow-lg transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save Timings</span>
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -751,7 +1125,7 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
       {/* SLOT EDIT / CREATE MODAL */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-[#1A1C23] border border-[#2D3139] rounded-3xl w-full max-w-lg p-5 sm:p-6 shadow-2xl space-y-4 animate-scale-up">
+          <div className="bg-[#1A1C23] border border-[#2D3139] rounded-3xl w-full max-w-lg p-5 sm:p-6 shadow-2xl space-y-4 animate-scale-up my-auto">
             <div className="flex items-center justify-between border-b border-[#2D3139] pb-3">
               <div className="flex items-center gap-2">
                 <CalendarDays className="w-5 h-5 text-purple-400" />
@@ -778,7 +1152,7 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                     onChange={e => setFormData({ ...formData, day: e.target.value as TimetableDay })}
                     className="w-full px-3 py-2 rounded-xl bg-[#0F1115] border border-[#2D3139] text-white font-semibold focus:outline-none focus:border-purple-500"
                   >
-                    {TIMETABLE_DAYS.map(d => (
+                    {activeDays.map(d => (
                       <option key={d} value={d}>{d}</option>
                     ))}
                   </select>
@@ -790,7 +1164,7 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                     value={formData.periodNumber}
                     onChange={e => {
                       const pNum = Number(e.target.value);
-                      const timing = DEFAULT_PERIOD_TIMINGS[pNum - 1] || DEFAULT_PERIOD_TIMINGS[0];
+                      const timing = periodTimings[pNum - 1] || periodTimings[0] || DEFAULT_PERIOD_TIMINGS[0];
                       setFormData({
                         ...formData,
                         periodNumber: pNum,
@@ -800,12 +1174,41 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
                     }}
                     className="w-full px-3 py-2 rounded-xl bg-[#0F1115] border border-[#2D3139] text-white font-semibold focus:outline-none focus:border-purple-500"
                   >
-                    {DEFAULT_PERIOD_TIMINGS.map(p => (
+                    {periodTimings.map(p => (
                       <option key={p.periodNumber} value={p.periodNumber}>
                         {p.label} ({p.startTime} - {p.endTime})
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              {/* Start Time & End Time (Individually Editable per Period Slot) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-300 mb-1">
+                    Start Time * <span className="text-[10px] text-amber-300 font-mono">({formData.startTime})</span>
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={to24HourTime(formData.startTime)}
+                    onChange={e => setFormData({ ...formData, startTime: to12HourTime(e.target.value) })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#0F1115] border border-[#2D3139] text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-300 mb-1">
+                    End Time * <span className="text-[10px] text-amber-300 font-mono">({formData.endTime})</span>
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={to24HourTime(formData.endTime)}
+                    onChange={e => setFormData({ ...formData, endTime: to12HourTime(e.target.value) })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#0F1115] border border-[#2D3139] text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
                 </div>
               </div>
 

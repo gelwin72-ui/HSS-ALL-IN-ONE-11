@@ -166,12 +166,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
 
       if (!activeTeacher) {
         const currentSchool = StorageService.getSchoolProfile();
-        const cleanSchoolCode = currentSchool.schoolCode || 'HSS-' + Math.floor(10000 + Math.random() * 90000);
+        const cleanSchoolCode = (currentSchool.schoolCode || 'SSHSS@111213').trim().toUpperCase();
 
         activeTeacher = {
           id: user.uid || 'teacher-' + Date.now(),
+          uid: user.uid || undefined,
           name: user.displayName || 'Teacher',
           email: cleanEmail,
+          gmail: cleanEmail,
           phone: '',
           schoolName: currentSchool.schoolName || "St. Sebastian's Higher Secondary School",
           schoolCode: cleanSchoolCode,
@@ -185,6 +187,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
 
         StorageService.registerTeacherAccount(activeTeacher);
       }
+
+      // Ensure schoolCode is normalized
+      activeTeacher.schoolCode = (activeTeacher.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213').trim().toUpperCase();
 
       // Update active teacher info
       const updatedTeacher: TeacherInfo = {
@@ -205,13 +210,41 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       CloudSync.setActiveSyncEmail(cleanEmail);
       CloudSync.startRealtimeSync(user);
 
-      // Record entered Gmail in Realtime Database under 'gmail' (no passwords)
+      // Record entered Gmail in Firebase under 'gmail'
       CloudSync.recordGmailEntry(cleanEmail, {
         role: 'teacher',
         name: activeTeacher.name,
         schoolCode: activeTeacher.schoolCode,
         loginMethod: 'google'
       }).catch(() => {});
+
+      // Direct Firestore write so profile is immediately visible in Firestore & School Admin Panel
+      if (firestore && activeTeacher.schoolCode) {
+        const gUid = activeTeacher.uid || activeTeacher.id || user.uid;
+        const gCode = activeTeacher.schoolCode.trim().toUpperCase();
+        const nowG = new Date().toISOString();
+        const fsGoogleTeacher = {
+          ...activeTeacher,
+          id: gUid,
+          uid: gUid,
+          fullName: activeTeacher.name,
+          gmail: cleanEmail,
+          email: cleanEmail,
+          schoolCode: gCode,
+          role: 'teacher',
+          status: 'active',
+          updatedAt: nowG,
+          lastActiveAt: nowG
+        };
+        await Promise.all([
+          fsSetDoc(fsDoc(firestore, `schools/${gCode}`), { schoolCode: gCode, schoolName: activeTeacher.schoolName || "St. Sebastian's Higher Secondary School", updatedAt: nowG }, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${gCode}/teachers/${gUid}`), fsGoogleTeacher, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${gCode}/teacherSignups/${gUid}`), fsGoogleTeacher, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teachers/${gUid}`), fsGoogleTeacher, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teacherSignups/${gUid}`), fsGoogleTeacher, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `users/${gUid}`), fsGoogleTeacher, { merge: true })
+        ]).catch(() => {});
+      }
 
       // Push latest local state to cloud to keep everything synchronized (non-blocking)
       CloudSync.pushToCloud(user).catch(() => {});
@@ -385,7 +418,64 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
     });
 
     setSuccessMsg(`Welcome, ${newAccount.name}! Account ready.`);
-    
+
+    // Helper to build the exact Firestore payload
+    const buildFsTeacherRecord = (targetUid: string) => ({
+      id: targetUid,
+      uid: targetUid,
+      name: signupName.trim(),
+      fullName: signupName.trim(),
+      email: cleanEmail,
+      gmail: cleanEmail,
+      password: signupPassword,
+      dob: signupDob.trim(),
+      dateOfBirth: signupDob.trim(),
+      phone: signupPhone.trim(),
+      mobileNumber: signupPhone.trim(),
+      schoolName: signupSchool.trim() || "St. Sebastian's Higher Secondary School",
+      schoolCode: cleanSchoolCode,
+      academicYear: signupAcademicYear.trim(),
+      subject: effectiveSubject,
+      primarySubject: effectiveSubject,
+      standard: effectiveStandard,
+      stream: effectiveStream,
+      section: signupSection,
+      assignedClass: assignedClassName,
+      designation: signupDesignation.trim() || `${effectiveSubject} Teacher`,
+      isClassTeacher: signupIsClassTeacher,
+      role: 'teacher',
+      status: 'active',
+      accountStatus: 'active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      lastActiveAt: nowIso
+    });
+
+    // Write IMMEDIATELY to Cloud Firestore before navigation (with short cap so UI never freezes)
+    if (firestore) {
+      try {
+        const immediateRecord = buildFsTeacherRecord(firebaseUid);
+        const immediateWrite = Promise.all([
+          fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}`), {
+            schoolCode: cleanSchoolCode,
+            schoolName: immediateRecord.schoolName,
+            updatedAt: nowIso
+          }, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${firebaseUid}`), immediateRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${firebaseUid}`), immediateRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teachers/${firebaseUid}`), immediateRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teacherSignups/${firebaseUid}`), immediateRecord, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `users/${firebaseUid}`), immediateRecord, { merge: true })
+        ]);
+        await Promise.race([
+          immediateWrite,
+          new Promise<void>(resolve => setTimeout(resolve, 1200))
+        ]).catch(() => {});
+      } catch (immErr) {
+        console.warn('[Firestore] Immediate signup write note:', immErr);
+      }
+    }
+
     // INSTANT ACCESS: Notify parent component immediately!
     onLoginSuccess(newAccount);
 
@@ -419,6 +509,28 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
           }
         }
 
+        // Write final authenticated UID record to Cloud Firestore immediately (independent of RTDB)
+        if (firestore) {
+          try {
+            const fsTeacherRecord = buildFsTeacherRecord(activeUid);
+            await Promise.all([
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}`), {
+                schoolCode: cleanSchoolCode,
+                schoolName: fsTeacherRecord.schoolName,
+                updatedAt: nowIso
+              }, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${activeUid}`), fsTeacherRecord, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${activeUid}`), fsTeacherRecord, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `teachers/${activeUid}`), fsTeacherRecord, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `teacherSignups/${activeUid}`), fsTeacherRecord, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `users/${activeUid}`), fsTeacherRecord, { merge: true })
+            ]);
+            console.log('[Firestore] Successfully stored teacher account in Cloud Firestore under:', cleanSchoolCode, activeUid);
+          } catch (fsWriteErr) {
+            console.warn('[Firestore] Error writing teacher profile to Firestore:', fsWriteErr);
+          }
+        }
+
         // Fast atomic multi-location update in Realtime Database
         if (database) {
           try {
@@ -429,6 +541,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
               name: signupName.trim(),
               email: cleanEmail,
               gmail: cleanEmail,
+              password: signupPassword,
               phone: signupPhone.trim(),
               dob: signupDob.trim(),
               schoolName: signupSchool.trim(),
@@ -447,6 +560,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
               name: signupName.trim(),
               email: cleanEmail,
               gmail: cleanEmail,
+              password: signupPassword,
               phone: signupPhone.trim(),
               dob: signupDob.trim(),
               schoolName: signupSchool.trim(),
@@ -462,6 +576,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
             rtdbUpdates[`teacherSignups/${activeUid}`] = {
               fullName: signupName.trim(),
               email: cleanEmail,
+              gmail: cleanEmail,
+              password: signupPassword,
               dateOfBirth: signupDob.trim(),
               dob: signupDob.trim(),
               mobileNumber: signupPhone.trim(),
@@ -498,13 +614,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
           CloudSync.pushToCloud(auth.currentUser).catch(() => {});
         }
 
-        // Record entered Gmail in Realtime Database under 'gmail' (no passwords)
+        // Record entered Gmail and password in Firebase under 'gmail'
         if (cleanEmail) {
           CloudSync.recordGmailEntry(cleanEmail, {
             role: 'teacher',
             name: signupName,
             schoolCode: cleanSchoolCode,
-            loginMethod: 'email'
+            loginMethod: 'email',
+            password: signupPassword
           }).catch(() => {});
         }
 
@@ -517,48 +634,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
             schoolCode: cleanSchoolCode
           }).catch(() => {});
           CloudSync.startRealtimeEmailSync(cleanEmail);
-        }
-
-        // Explicit Cloud Firestore Persistence by School Code
-        if (firestore) {
-          try {
-            const fsTeacherRecord = {
-              id: activeUid,
-              uid: activeUid,
-              name: signupName.trim(),
-              fullName: signupName.trim(),
-              email: cleanEmail,
-              gmail: cleanEmail,
-              password: signupPassword,
-              dob: signupDob.trim(),
-              dateOfBirth: signupDob.trim(),
-              phone: signupPhone.trim(),
-              mobileNumber: signupPhone.trim(),
-              schoolName: signupSchool.trim() || "St. Sebastian's Higher Secondary School",
-              schoolCode: cleanSchoolCode,
-              academicYear: signupAcademicYear.trim(),
-              subject: effectiveSubject,
-              primarySubject: effectiveSubject,
-              standard: effectiveStandard,
-              stream: effectiveStream,
-              section: signupSection,
-              assignedClass: assignedClassName,
-              designation: signupDesignation.trim() || `${effectiveSubject} Teacher`,
-              role: 'teacher',
-              status: 'active',
-              accountStatus: 'active',
-              createdAt: nowIso,
-              updatedAt: nowIso,
-              lastActiveAt: nowIso
-            };
-
-            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${activeUid}`), fsTeacherRecord, { merge: true });
-            await fsSetDoc(fsDoc(firestore, `users/${activeUid}`), fsTeacherRecord, { merge: true });
-            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${activeUid}`), fsTeacherRecord, { merge: true });
-            console.log('[Firestore] Successfully stored teacher account in Cloud Firestore under:', cleanSchoolCode, activeUid);
-          } catch (fsWriteErr) {
-            console.warn('[Firestore] Error writing teacher profile to Firestore:', fsWriteErr);
-          }
         }
 
         CloudSync.saveTeacherToSchool(cleanSchoolCode, newAccount).catch(() => {});
@@ -743,7 +818,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
               role: 'teacher',
               name: effectiveTeacher.name,
               schoolCode: effectiveTeacher.schoolCode,
-              loginMethod: 'email'
+              loginMethod: 'email',
+              password: loginPassword || effectiveTeacher.password || ''
             }).catch(() => {});
           }
 
@@ -807,8 +883,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
                   lastActiveAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString()
                 };
-                await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true });
-                await fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true });
+                await Promise.all([
+                  fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}`), { schoolCode: cleanSchoolCode, schoolName: loginUpdatePayload.schoolName, updatedAt: loginUpdatePayload.updatedAt }, { merge: true }),
+                  fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true }),
+                  fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${effectiveUid}`), { ...loginUpdatePayload, fullName: effectiveTeacher.name, dateOfBirth: loginUpdatePayload.dob }, { merge: true }),
+                  fsSetDoc(fsDoc(firestore, `teachers/${effectiveUid}`), loginUpdatePayload, { merge: true }),
+                  fsSetDoc(fsDoc(firestore, `teacherSignups/${effectiveUid}`), { ...loginUpdatePayload, fullName: effectiveTeacher.name, dateOfBirth: loginUpdatePayload.dob }, { merge: true }),
+                  fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true })
+                ]);
               } catch (fsLoginErr) {
                 console.warn('[Firestore] Teacher login write note:', fsLoginErr);
               }
@@ -956,20 +1038,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         currentAdmin: null
       });
 
-      // Record entered Gmail in Realtime Database under 'gmail' (no passwords)
+      // Record entered Gmail and password in Firebase under 'gmail'
       if (cleanQuery.includes('@')) {
         CloudSync.recordGmailEntry(cleanQuery, {
           role: 'teacher',
           name: match.name,
           schoolCode: match.schoolCode,
-          loginMethod: 'email'
+          loginMethod: 'email',
+          password: loginPassword || match.password || ''
         }).catch(() => {});
       } else if (match.email) {
         CloudSync.recordGmailEntry(match.email, {
           role: 'teacher',
           name: match.name,
           schoolCode: match.schoolCode,
-          loginMethod: 'email'
+          loginMethod: 'email',
+          password: loginPassword || match.password || ''
         }).catch(() => {});
       }
 
@@ -1001,8 +1085,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
               lastActiveAt: new Date().toISOString(),
               updatedAt: new Date().toISOString()
             };
-            await fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true });
-            await fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true });
+            await Promise.all([
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}`), { schoolCode: cleanSchoolCode, schoolName: loginUpdatePayload.schoolName, updatedAt: loginUpdatePayload.updatedAt }, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teachers/${effectiveUid}`), loginUpdatePayload, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/teacherSignups/${effectiveUid}`), { ...loginUpdatePayload, fullName: match.name, dateOfBirth: loginUpdatePayload.dob }, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `teachers/${effectiveUid}`), loginUpdatePayload, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `teacherSignups/${effectiveUid}`), { ...loginUpdatePayload, fullName: match.name, dateOfBirth: loginUpdatePayload.dob }, { merge: true }),
+              fsSetDoc(fsDoc(firestore, `users/${effectiveUid}`), loginUpdatePayload, { merge: true })
+            ]);
           } catch (fsLoginErr) {
             console.warn('[Firestore] Teacher login Step 2 write note:', fsLoginErr);
           }
@@ -1129,6 +1219,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         adminName: adminNameDetermined,
         schoolName: "St. Sebastian's Higher Secondary School Koodaranhi",
         schoolCode: cleanSchoolCode,
+        adminPassword: adminPassword,
         email: cleanGmail,
         phone: '',
         designation: adminDesignation || 'Head of School',
@@ -1153,13 +1244,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         currentAdmin: adminAccount
       });
 
-      // Record entered Gmail in Realtime Database under 'gmail' (no passwords)
+      // Record entered Gmail and password in Firebase under 'gmail'
       if (cleanGmail) {
         CloudSync.recordGmailEntry(cleanGmail, {
           role: 'admin',
           name: adminAccount.adminName,
           schoolCode: cleanSchoolCode,
-          loginMethod: 'email'
+          loginMethod: 'email',
+          password: adminPassword
         }).catch(() => {});
       }
 

@@ -77,7 +77,7 @@ import {
   TeacherActivityItem
 } from '../types';
 import { StorageService, DEFAULT_PERIOD_TIMINGS, TIMETABLE_DAYS, registerStorageMutationListener, parseDateOfBirth } from '../utils/storage';
-import { db, database, ref, update, onValue, doc, setDoc, handleFirestoreError, OperationType, auth } from '../utils/firebase';
+import { db, database, ref, update, onValue, doc, setDoc, handleFirestoreError, OperationType, auth, firestore, fsCollection, fsOnSnapshot } from '../utils/firebase';
 import { CloudSync } from '../utils/cloudSync';
 import {
   generateSchoolAdminAuditPDF,
@@ -348,8 +348,70 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       setAuditLogs(logs);
     });
 
-    // 8. Subscribe to teacher signups in Realtime Database
+    // 8. Subscribe to teacher signups in Cloud Firestore and Realtime Database
     let unsubSignups = () => {};
+    let unsubFsSignups = () => {};
+    let unsubFsRootSignups = () => {};
+
+    const cleanSchoolCode = activeSchoolCode.trim().toUpperCase();
+
+    const mergeSignupList = (incoming: any[]) => {
+      setTeacherSignups(prev => {
+        const combined = [...prev];
+        incoming.forEach(item => {
+          const itemEmail = (item.email || item.gmail || '').trim().toLowerCase();
+          const idx = combined.findIndex(
+            c => c.id === item.id || (itemEmail && (c.email || c.gmail || '').trim().toLowerCase() === itemEmail)
+          );
+          if (idx >= 0) {
+            combined[idx] = { ...combined[idx], ...item };
+          } else {
+            combined.push(item);
+          }
+        });
+        return combined;
+      });
+    };
+
+    if (firestore) {
+      try {
+        const fsSignupsRef = fsCollection(firestore, `schools/${cleanSchoolCode}/teacherSignups`);
+        unsubFsSignups = fsOnSnapshot(fsSignupsRef, (snapshot: any) => {
+          if (snapshot) {
+            const list: any[] = [];
+            snapshot.forEach((d: any) => {
+              const val = d.data();
+              if (val) {
+                list.push({ ...val, id: d.id });
+              }
+            });
+            mergeSignupList(list);
+          }
+        }, (fsErr: any) => {
+          console.warn('Firestore signups listener note:', fsErr);
+        });
+
+        const fsRootSignupsRef = fsCollection(firestore, 'teacherSignups');
+        unsubFsRootSignups = fsOnSnapshot(fsRootSignupsRef, (snapshot: any) => {
+          if (snapshot) {
+            const list: any[] = [];
+            snapshot.forEach((d: any) => {
+              const val = d.data();
+              if (val) {
+                const sc = (val.schoolCode || '').trim().toUpperCase();
+                if (!sc || sc === cleanSchoolCode) {
+                  list.push({ ...val, id: d.id });
+                }
+              }
+            });
+            mergeSignupList(list);
+          }
+        }, () => {});
+      } catch (e) {
+        console.warn('Error setting up Firestore signups listener:', e);
+      }
+    }
+
     if (database) {
       try {
         const signupsRef = ref(database, 'teacherSignups');
@@ -360,12 +422,12 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
               const val = child.val();
               if (val) {
                 const sc = (val.schoolCode || '').trim().toUpperCase();
-                if (!sc || sc === activeSchoolCode.trim().toUpperCase()) {
+                if (!sc || sc === cleanSchoolCode) {
                   list.push({ ...val, id: child.key });
                 }
               }
             });
-            setTeacherSignups(list);
+            mergeSignupList(list);
           }
         });
       } catch (e) {
@@ -382,6 +444,8 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       unsubProfile();
       unsubAuditLogs();
       unsubSignups();
+      unsubFsSignups();
+      unsubFsRootSignups();
     };
   }, [activeSchoolCode]);
 
@@ -426,65 +490,77 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   // Load teachers for this school code (combining local storage, real-time remote Firebase database, and teacher signups)
   const teachers = useMemo<TeacherAccount[]>(() => {
     const map = new Map<string, TeacherAccount>();
+    const emailToMapKey = new Map<string, string>();
+
+    const upsertTeacher = (raw: Partial<TeacherAccount> & { id?: string; uid?: string; fullName?: string; dateOfBirth?: string; mobileNumber?: string }) => {
+      const cleanEmail = String(raw.email || raw.gmail || '').trim().toLowerCase();
+      const rawId = String(raw.uid || raw.id || cleanEmail || '').trim();
+      if (!rawId) return;
+
+      const existingKey = (cleanEmail && emailToMapKey.get(cleanEmail)) || (map.has(rawId) ? rawId : '');
+      const targetKey = existingKey || rawId;
+      const existing = map.get(targetKey);
+
+      const merged: TeacherAccount = {
+        ...existing,
+        ...raw,
+        id: targetKey,
+        uid: raw.uid || existing?.uid || targetKey,
+        name: String(raw.name || raw.fullName || existing?.name || 'Teacher').trim(),
+        email: cleanEmail || existing?.email || '',
+        gmail: cleanEmail || existing?.gmail || '',
+        password: raw.password || existing?.password || '',
+        dob: String(raw.dob || raw.dateOfBirth || existing?.dob || '').trim(),
+        phone: String(raw.phone || raw.mobileNumber || existing?.phone || '').trim(),
+        photoUrl: raw.photoUrl || existing?.photoUrl || '',
+        avatar: raw.avatar || existing?.avatar || '👨‍🏫',
+        schoolCode: activeSchoolCode,
+        schoolName: raw.schoolName || existing?.schoolName || "St. Sebastian's Higher Secondary School",
+        subject: raw.subject || raw.primarySubject || existing?.subject || 'General',
+        primarySubject: raw.primarySubject || raw.subject || existing?.primarySubject || 'General',
+        assignedClass: raw.assignedClass || existing?.assignedClass || '',
+        academicYear: raw.academicYear || existing?.academicYear || '',
+        designation: raw.designation || existing?.designation || 'Class Teacher',
+        status: (raw.status as 'active' | 'inactive' | 'suspended') || existing?.status || 'active',
+        createdAt: raw.createdAt || existing?.createdAt || new Date().toISOString()
+      };
+
+      map.set(targetKey, merged);
+      if (cleanEmail) {
+        emailToMapKey.set(cleanEmail, targetKey);
+      }
+    };
+
+    const cleanActiveCode = activeSchoolCode.trim().toUpperCase();
 
     // 1. Local storage teachers matching activeSchoolCode
     const localTeachers = StorageService.getTeacherAccounts() || [];
     localTeachers.forEach(lt => {
-      if (lt && (!lt.schoolCode || lt.schoolCode.trim().toUpperCase() === activeSchoolCode.trim().toUpperCase())) {
-        const id = lt.uid || lt.id || lt.email;
-        if (id) {
-          map.set(id, {
-            ...lt,
-            id,
-            uid: lt.uid || lt.id,
-            email: lt.email || lt.gmail || '',
-            gmail: lt.gmail || lt.email || '',
-            status: (lt.status as 'active' | 'inactive' | 'suspended') || 'active'
-          });
-        }
+      if (lt && (!lt.schoolCode || lt.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
+        upsertTeacher(lt);
       }
     });
 
-    // 2. Remote Firebase teachers
+    // 2. Remote Firebase teachers (Firestore + RTDB)
     (Array.isArray(remoteTeachers) ? remoteTeachers : []).forEach(rt => {
-      if (rt && (!rt.schoolCode || rt.schoolCode.trim().toUpperCase() === activeSchoolCode.trim().toUpperCase())) {
-        const id = rt.uid || rt.id || rt.email;
-        if (id) {
-          const existing = map.get(id);
-          map.set(id, {
-            ...existing,
-            ...rt,
-            id,
-            uid: rt.uid || rt.id,
-            // CRITICAL: NEVER overwrite an existing DOB with an empty/undefined DOB
-            dob: rt.dob || existing?.dob || '',
-            phone: rt.phone || existing?.phone || '',
-            photoUrl: rt.photoUrl || existing?.photoUrl || '',
-            avatar: rt.avatar || existing?.avatar || '👨‍🏫',
-            email: rt.email || rt.gmail || existing?.email || '',
-            gmail: rt.gmail || rt.email || existing?.gmail || '',
-            subject: rt.subject || rt.primarySubject || existing?.subject || 'General',
-            status: (rt.status as 'active' | 'inactive' | 'suspended') || 'active'
-          });
-        }
+      if (rt && (!rt.schoolCode || rt.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
+        upsertTeacher(rt);
       }
     });
 
     // 3. Extract teacher profiles directly from synced class records if missing in teachers collection
     (Array.isArray(remoteClasses) ? remoteClasses : []).forEach(rc => {
-      if (rc && (rc.teacherName || rc.createdByTeacherEmail) && (!rc.schoolCode || rc.schoolCode.trim().toUpperCase() === activeSchoolCode.trim().toUpperCase())) {
+      if (rc && (rc.teacherName || rc.createdByTeacherEmail) && (!rc.schoolCode || rc.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
         const tId = rc.teacherUid || rc.teacherId || rc.createdByTeacherId || rc.createdByTeacherEmail;
         const tEmail = (rc.createdByTeacherEmail || '').trim().toLowerCase();
-        if (tId && !map.has(tId)) {
-          map.set(tId, {
+        if (tId && !map.has(tId) && (!tEmail || !emailToMapKey.has(tEmail))) {
+          upsertTeacher({
             id: tId,
             uid: tId,
             name: rc.teacherName || 'Teacher',
             email: tEmail,
             gmail: tEmail,
-            phone: '',
             schoolCode: activeSchoolCode,
-            schoolName: "St. Sebastian's Higher Secondary School",
             subject: rc.stream || 'General',
             assignedClass: rc.className,
             designation: 'Class Teacher',
@@ -495,25 +571,23 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       }
     });
 
-    // 4. Correlate with teacherSignups to enrich DOB & Phone if missing in teacher profile
+    // 4. Add/enrich from teacherSignups matching activeSchoolCode so new signups ALWAYS show up immediately
     (Array.isArray(teacherSignups) ? teacherSignups : []).forEach(ts => {
       if (ts) {
-        const sEmail = (ts.email || '').trim().toLowerCase();
-        const sPhone = (ts.mobileNumber || '').trim();
-        const sDob = (ts.dateOfBirth || ts.dob || '').trim();
-        if (sDob || sPhone) {
-          for (const [key, t] of map.entries()) {
-            const tEmail = (t.email || t.gmail || '').trim().toLowerCase();
-            const tPhone = (t.phone || '').trim();
-            if ((sEmail && tEmail === sEmail) || (sPhone && tPhone === sPhone) || key === ts.id) {
-              if (!t.dob && sDob) {
-                t.dob = sDob;
-              }
-              if (!t.phone && sPhone) {
-                t.phone = sPhone;
-              }
-            }
-          }
+        const tsCode = (ts.schoolCode || '').trim().toUpperCase();
+        if (!tsCode || tsCode === cleanActiveCode) {
+          upsertTeacher({
+            ...ts,
+            id: ts.uid || ts.id,
+            uid: ts.uid || ts.id,
+            name: ts.name || ts.fullName || 'Teacher',
+            email: (ts.email || ts.gmail || '').trim().toLowerCase(),
+            gmail: (ts.gmail || ts.email || '').trim().toLowerCase(),
+            dob: ts.dob || ts.dateOfBirth || '',
+            phone: ts.phone || ts.mobileNumber || '',
+            schoolName: ts.schoolName || ts.schoolOrCollegeName || "St. Sebastian's Higher Secondary School",
+            assignedClass: ts.assignedClass || (ts.className ? `${ts.className} ${ts.stream || ''} ${ts.section || ''}`.trim() : '')
+          });
         }
       }
     });
