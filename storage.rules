@@ -1,0 +1,48 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidFileSize() {
+      return request.resource.size > 0 && request.resource.size <= 10 * 1024 * 1024;
+    }
+
+    function isAllowedImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    function isAllowedBackupOrDoc() {
+      return request.resource.contentType.matches('application/(json|pdf)|text/(csv|plain)');
+    }
+
+    // Student & Teacher Profile Photos scoped by schoolCode
+    match /schools/{schoolCode}/students/{studentId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidFileSize() && isAllowedImage();
+    }
+
+    match /schools/{schoolCode}/teachers/{teacherId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidFileSize() && isAllowedImage();
+    }
+
+    // Backups & Exported Documents scoped by schoolCode
+    match /schools/{schoolCode}/backups/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidFileSize() && isAllowedBackupOrDoc();
+    }
+
+    // User-scoped uploads
+    match /users/{userId}/{allUserFiles=**} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if isSignedIn() && request.auth.uid == userId && isValidFileSize() && (isAllowedImage() || isAllowedBackupOrDoc());
+    }
+  }
+}

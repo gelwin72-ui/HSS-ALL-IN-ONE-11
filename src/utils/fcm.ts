@@ -1,6 +1,6 @@
 import { getMessaging, getToken, onMessage, Messaging } from 'firebase/messaging';
 import { ref, set, remove, get } from 'firebase/database';
-import { app, database, auth, firestore, fsDoc, fsSetDoc } from './firebase';
+import { app, database, auth, firestore, fsDoc, fsSetDoc, fsDeleteDoc } from './firebase';
 
 export interface NotificationPreferences {
   enabled: boolean;
@@ -154,7 +154,7 @@ export function getNotificationPreferences(): NotificationPreferences {
 }
 
 /**
- * Saves notification preferences locally and syncs to Realtime Database if authenticated
+ * Saves notification preferences locally and syncs to Firestore and Realtime Database if authenticated
  */
 export async function saveNotificationPreferences(
   prefs: NotificationPreferences,
@@ -164,15 +164,25 @@ export async function saveNotificationPreferences(
   localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(prefs));
 
   const uid = userUid || auth?.currentUser?.uid;
+  const payload = {
+    ...prefs,
+    updatedAt: new Date().toISOString()
+  };
+
+  if (uid && firestore) {
+    try {
+      await fsSetDoc(fsDoc(firestore, 'notification_preferences', uid), payload, { merge: true });
+    } catch (err) {
+      console.error('[FCM] Error saving preferences to Firestore:', err);
+    }
+  }
+
   if (uid && database) {
     try {
       const prefsRef = ref(database, `notification_preferences/${uid}`);
-      await set(prefsRef, {
-        ...prefs,
-        updatedAt: new Date().toISOString()
-      });
+      await set(prefsRef, payload);
     } catch (err) {
-      console.warn('[FCM] Warning saving preferences to cloud:', err);
+      console.warn('[FCM] Warning saving preferences to RTDB:', err);
     }
   }
 }
@@ -323,7 +333,7 @@ async function saveTokenToDatabase(
 
     if (firestore) {
       try {
-        const fsTokenRef = fsDoc(firestore, 'fcm_tokens', cleanSchoolCode, userUid, tokenId);
+        const fsTokenRef = fsDoc(firestore, 'fcm_tokens', userUid, 'tokens', tokenId);
         await fsSetDoc(fsTokenRef, record, { merge: true });
 
         const fsSchoolTokenRef = fsDoc(firestore, 'schools', cleanSchoolCode, 'tokens', userUid);
@@ -408,11 +418,26 @@ export function setupForegroundMessageListener(messagingInstance?: Messaging): v
  * Removes active FCM token from database on logout or when notifications are disabled
  */
 export async function removeFCMToken(userUid: string, schoolCode: string): Promise<void> {
-  if (!userUid || !database) return;
+  if (!userUid) return;
   try {
     const cleanSchoolCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
-    const tokenRef = ref(database, `fcm_tokens/${cleanSchoolCode}/${userUid}`);
-    await remove(tokenRef);
+    const cachedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (firestore) {
+      try {
+        await fsDeleteDoc(fsDoc(firestore, 'schools', cleanSchoolCode, 'tokens', userUid));
+        if (cachedToken) {
+          const tokenId = btoa(cachedToken).replace(/[/+=]/g, '_').substring(0, 32);
+          await fsDeleteDoc(fsDoc(firestore, 'fcm_tokens', userUid, 'tokens', tokenId));
+        }
+      } catch (fsErr) {
+        console.warn('[FCM] Firestore token delete note:', fsErr);
+      }
+    }
+    if (database) {
+      const tokenRef = ref(database, `fcm_tokens/${cleanSchoolCode}/${userUid}`);
+      await remove(tokenRef).catch(() => {});
+      await remove(ref(database, `schools/${cleanSchoolCode}/tokens/${userUid}`)).catch(() => {});
+    }
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch (err) {
     console.warn('[FCM] Error removing FCM token on logout:', err);

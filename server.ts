@@ -3,16 +3,44 @@ dotenv.config();
 
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
+import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 import { getAuth } from "firebase-admin/auth";
 import { createServer as createViteServer } from "vite";
 
+const PRE_AUTHORIZED_ADMIN_EMAILS = new Set([
+  "gelwin72@gmail.com",
+  "joicegeorge1910@gmail.com",
+  "lincythomas1911@gmail.com"
+]);
+const ALLOWED_ADMIN_SCHOOL_CODE = "SSHSS@111213";
+
+function loadFirebaseAppletConfig() {
+  try {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    }
+  } catch (e) {
+    console.warn("Could not read firebase-applet-config.json:", e);
+  }
+  return {};
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
-  
+  const appletConfig = loadFirebaseAppletConfig();
+  const firebaseProjectId = appletConfig.projectId || process.env.VITE_FIREBASE_PROJECT_ID || "hss-all-in-one-1";
+  const envDbUrl = process.env.VITE_FIREBASE_DATABASE_URL || "";
+  const firebaseDatabaseURL =
+    appletConfig.databaseURL ||
+    (envDbUrl.includes(firebaseProjectId) ? envDbUrl : `https://${firebaseProjectId}-default-rtdb.firebaseio.com`);
+  const firestoreDatabaseId = appletConfig.firestoreDatabaseId || process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || "(default)";
+
   app.use(express.json());
 
   // In-memory rate limiting map: schoolCode -> array of timestamps
@@ -23,12 +51,17 @@ async function startServer() {
     try {
       if (!getApps().length) {
         initializeApp({
-          databaseURL: "https://hssallinone2026-default-rtdb.firebaseio.com",
-          projectId: "hssallinone2026"
+          databaseURL: firebaseDatabaseURL,
+          projectId: firebaseProjectId
         });
       }
+      const fsDb =
+        firestoreDatabaseId && firestoreDatabaseId !== "(default)"
+          ? getFirestore(getApps()[0], firestoreDatabaseId)
+          : getFirestore(getApps()[0]);
       return {
         db: getDatabase(),
+        firestore: fsDb,
         messaging: getMessaging(),
         auth: getAuth()
       };
@@ -43,7 +76,7 @@ async function startServer() {
     res.status(200).send("OK");
   });
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", projectId: firebaseProjectId, firestoreDatabaseId });
   });
 
   // Diagnostic notification test endpoint
@@ -52,9 +85,78 @@ async function startServer() {
     res.json({
       status: "online",
       adminSdkConfigured: Boolean(admin),
-      projectId: "hss-all-in-one",
+      projectId: firebaseProjectId,
+      firestoreDatabaseId,
       serverTime: new Date().toISOString()
     });
+  });
+
+  // Bootstrap verified pre-authorized school administrator record in Firestore
+  app.post("/api/admin/bootstrap", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization || "";
+      if (!authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing Firebase Auth Bearer token" });
+      }
+      const idToken = authHeader.slice(7).trim();
+      const adminServices = getAdminServices();
+      if (!adminServices) {
+        return res.status(503).json({ error: "Firebase Admin SDK is not initialized" });
+      }
+
+      const decoded = await adminServices.auth.verifyIdToken(idToken);
+      const email = (decoded.email || "").trim().toLowerCase();
+      const schoolCode = String(req.body?.schoolCode || "").trim().toUpperCase();
+
+      if (!PRE_AUTHORIZED_ADMIN_EMAILS.has(email) || schoolCode !== ALLOWED_ADMIN_SCHOOL_CODE) {
+        return res.status(403).json({ error: "Email or schoolCode is not authorized for School Admin privileges" });
+      }
+
+      const now = new Date().toISOString();
+      const adminName = String(req.body?.adminName || decoded.name || email.split("@")[0]).trim();
+      const schoolName = String(req.body?.schoolName || "St. Sebastian's Higher Secondary School Koodaranhi").trim();
+      const designation = String(req.body?.designation || "Principal & School Administrator").trim();
+
+      const adminDoc = {
+        id: decoded.uid,
+        uid: decoded.uid,
+        email,
+        gmail: email,
+        schoolCode: ALLOWED_ADMIN_SCHOOL_CODE,
+        schoolName,
+        adminName,
+        designation,
+        role: "admin",
+        status: "active",
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await Promise.all([
+        adminServices.firestore.doc(`admins/${decoded.uid}`).set(adminDoc, { merge: true }),
+        adminServices.firestore.doc(`schoolAdmins/${decoded.uid}`).set(adminDoc, { merge: true }),
+        adminServices.firestore.doc(`schools/${ALLOWED_ADMIN_SCHOOL_CODE}/schoolAdmins/${decoded.uid}`).set(adminDoc, { merge: true }),
+        adminServices.firestore.doc(`users/${decoded.uid}`).set({
+          userId: decoded.uid,
+          uid: decoded.uid,
+          email,
+          gmail: email,
+          role: "admin",
+          schoolCode: ALLOWED_ADMIN_SCHOOL_CODE,
+          schoolName,
+          active: true,
+          status: "active",
+          displayName: adminName,
+          name: adminName,
+          updatedAt: now
+        }, { merge: true })
+      ]);
+
+      return res.json({ success: true, uid: decoded.uid, schoolCode: ALLOWED_ADMIN_SCHOOL_CODE });
+    } catch (err: any) {
+      console.error("[Admin Bootstrap Error]:", err);
+      return res.status(401).json({ error: err?.message || "Failed to verify School Admin token" });
+    }
   });
 
   // In-memory set for teacher registration email deduplication
@@ -86,11 +188,23 @@ async function startServer() {
         });
       }
 
-      // Dynamically resolve School Admin's email address (defaulting to gelwin72@gmail.com)
+      // Dynamically resolve School Admin's email address from Firestore first, then RTDB
       let adminEmail = 'gelwin72@gmail.com';
       const adminServices = getAdminServices();
 
-      if (adminServices && adminServices.db) {
+      if (adminServices?.firestore) {
+        try {
+          const fsProfileSnap = await adminServices.firestore.doc(`schools/${cleanSchoolCode}/schoolProfile/info`).get();
+          const fsVal = fsProfileSnap.data();
+          if (fsVal?.schoolEmail && String(fsVal.schoolEmail).includes('@')) {
+            adminEmail = String(fsVal.schoolEmail).trim().toLowerCase();
+          }
+        } catch (e) {
+          console.warn("Could not query Firestore school profile email:", e);
+        }
+      }
+
+      if (adminEmail === 'gelwin72@gmail.com' && adminServices && adminServices.db) {
         try {
           const profileSnap = await adminServices.db.ref(`schools/${cleanSchoolCode}/schoolProfile`).once('value').catch(() => null);
           if (profileSnap && profileSnap.exists()) {
@@ -449,14 +563,19 @@ School Management System`;
         oneSignalResult = { dispatched: false, error: "OneSignal REST API key not configured in server environment." };
       }
 
-      // 6. FCM MULTICAST DISPATCH (Dual delivery engine)
+      // 6. FCM MULTICAST DISPATCH (Dual delivery engine across Firestore + RTDB)
       if (adminServices) {
-        const { db, messaging } = adminServices;
+        const { db, firestore: fsAdminDb, messaging } = adminServices;
         const tokensRef = db.ref(`fcm_tokens/${cleanSchoolCode}`);
-        const snapshot = await Promise.race([
-          tokensRef.once('value'),
-          new Promise<null>((res) => setTimeout(() => res(null), 2500))
-        ]).catch(() => null);
+        const [snapshot, fsTokensSnap] = await Promise.all([
+          Promise.race([
+            tokensRef.once('value'),
+            new Promise<null>((res) => setTimeout(() => res(null), 2500))
+          ]).catch(() => null),
+          fsAdminDb
+            ? fsAdminDb.collection(`schools/${cleanSchoolCode}/tokens`).get().catch(() => null)
+            : Promise.resolve(null)
+        ]);
 
         interface TokenEntry {
           token: string;
@@ -464,41 +583,48 @@ School Management System`;
           tokenId: string;
         }
         const tokenEntries: TokenEntry[] = [];
+        const seenTokens = new Set<string>();
+
+        const considerTokenData = (tokenData: any, uid: string, tokenId: string) => {
+          if (!tokenData || !tokenData.token || seenTokens.has(tokenData.token)) return;
+          if (targetUid && uid !== targetUid) return;
+          const prefs = tokenData.preferences;
+          if (prefs) {
+            if (prefs.enabled === false) return;
+            if (category === 'notices' && prefs.notices === false) return;
+            if (category === 'exams' && prefs.exams === false) return;
+            if (category === 'holidays' && prefs.holidays === false) return;
+            if (category === 'assignments' && prefs.assignments === false) return;
+            if (category === 'messages' && prefs.messages === false) return;
+            if (category === 'accountUpdates' && prefs.accountUpdates === false) return;
+          }
+          if (targetAudience && targetAudience !== 'All') {
+            const role = (tokenData.role || '').toLowerCase();
+            if (targetAudience === 'Teachers' && role !== 'teacher' && role !== 'principal') {
+              return;
+            }
+          }
+          seenTokens.add(tokenData.token);
+          tokenEntries.push({
+            token: tokenData.token,
+            userUid: uid,
+            tokenId
+          });
+        };
+
+        if (fsTokensSnap && !fsTokensSnap.empty) {
+          fsTokensSnap.forEach((docSnap) => {
+            considerTokenData(docSnap.data(), docSnap.id, docSnap.id);
+          });
+        }
 
         if (snapshot && snapshot.exists()) {
           const usersObj = snapshot.val();
           Object.keys(usersObj).forEach(uid => {
-            if (targetUid && uid !== targetUid) return;
-
             const userTokensObj = usersObj[uid];
             if (userTokensObj && typeof userTokensObj === 'object') {
               Object.keys(userTokensObj).forEach(tokenId => {
-                const tokenData = userTokensObj[tokenId];
-                if (tokenData && tokenData.token) {
-                  const prefs = tokenData.preferences;
-                  if (prefs) {
-                    if (prefs.enabled === false) return;
-                    if (category === 'notices' && prefs.notices === false) return;
-                    if (category === 'exams' && prefs.exams === false) return;
-                    if (category === 'holidays' && prefs.holidays === false) return;
-                    if (category === 'assignments' && prefs.assignments === false) return;
-                    if (category === 'messages' && prefs.messages === false) return;
-                    if (category === 'accountUpdates' && prefs.accountUpdates === false) return;
-                  }
-
-                  if (targetAudience && targetAudience !== 'All') {
-                    const role = (tokenData.role || '').toLowerCase();
-                    if (targetAudience === 'Teachers' && role !== 'teacher' && role !== 'principal') {
-                      return;
-                    }
-                  }
-
-                  tokenEntries.push({
-                    token: tokenData.token,
-                    userUid: uid,
-                    tokenId: tokenId
-                  });
-                }
+                considerTokenData(userTokensObj[tokenId], uid, tokenId);
               });
             }
           });

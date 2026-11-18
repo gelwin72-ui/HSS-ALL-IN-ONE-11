@@ -3,94 +3,971 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Global Allow Read/Write for seamless school management & multi-device sync
+    // 1. Default-Deny Global Catch-All
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
 
-    // School-Specific Multi-Tenant Data (Isolated by schoolCode)
+    // ------------------------------------------------------------------------
+    // Global Hardened Security Primitives
+    // ------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidKey(key) {
+      return key is string && key.size() >= 1 && key.size() <= 160 && key.matches('^[a-zA-Z0-9_\\-\\.@]+$');
+    }
+
+    function hasNoPasswordField(data) {
+      return !('password' in data) && !('adminPassword' in data);
+    }
+
+    function isVerifiedAdminEmail() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'gelwin72@gmail.com' ||
+          request.auth.token.email == 'joicegeorge1910@gmail.com' ||
+          request.auth.token.email == 'lincythomas1911@gmail.com'
+        );
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        isVerifiedAdminEmail()
+      );
+    }
+
+    function isUserInSchool(schoolCode) {
+      return isSignedIn()
+        && isValidKey(schoolCode)
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.schoolCode == schoolCode;
+    }
+
+    function isSchoolMemberOrAdmin(schoolCode) {
+      return isAdmin() || isUserInSchool(schoolCode);
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptionalNumber(data, field) {
+      return !(field in data) || data[field] is number;
+    }
+
+    function isOptionalBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isOptionalMap(data, field) {
+      return !(field in data) || data[field] is map;
+    }
+
+    function isOptionalList(data, field, maxLen) {
+      return !(field in data) || (data[field] is list && data[field].size() <= maxLen);
+    }
+
+    // ------------------------------------------------------------------------
+    // Entity Validation Blueprints
+    // ------------------------------------------------------------------------
+    function isValidUser(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['email', 'role', 'schoolCode'])
+        && data.keys().hasOnly([
+          'userId', 'uid', 'email', 'gmail', 'role', 'schoolCode', 'schoolName',
+          'active', 'status', 'displayName', 'name', 'phone', 'dob', 'photoURL',
+          'deviceId', 'lastSyncedAt', 'teacherAccount', 'adminAccount', 'appData',
+          'createdAt', 'updatedAt'
+        ])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.role in ['teacher', 'admin', 'schoolAdmin']
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'userId', 128)
+        && isOptionalString(data, 'uid', 128)
+        && isOptionalString(data, 'gmail', 200)
+        && isOptionalString(data, 'schoolName', 200)
+        && isOptionalBool(data, 'active')
+        && isOptionalString(data, 'status', 40)
+        && isOptionalString(data, 'displayName', 150)
+        && isOptionalString(data, 'name', 150)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'dob', 32)
+        && isOptionalString(data, 'photoURL', 1500)
+        && isOptionalString(data, 'deviceId', 128)
+        && isOptionalString(data, 'lastSyncedAt', 64)
+        && isOptionalMap(data, 'teacherAccount')
+        && isOptionalMap(data, 'adminAccount')
+        && isOptionalMap(data, 'appData')
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidAdmin(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'uid', 'email', 'schoolCode', 'role', 'status'])
+        && data.keys().hasOnly([
+          'id', 'uid', 'email', 'gmail', 'schoolCode', 'schoolName', 'adminName',
+          'designation', 'role', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.uid is string && data.uid.size() <= 128
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && data.role in ['admin', 'schoolAdmin']
+        && data.status in ['active', 'inactive']
+        && isOptionalString(data, 'gmail', 200)
+        && isOptionalString(data, 'schoolName', 200)
+        && isOptionalString(data, 'adminName', 150)
+        && isOptionalString(data, 'designation', 100)
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidEmailAccount(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['ownerUid', 'email', 'schoolCode'])
+        && data.keys().hasOnly([
+          'ownerUid', 'email', 'schoolCode', 'role', 'deviceId',
+          'teacherAccount', 'adminAccount', 'lastSyncedAt', 'updatedAt', 'appData'
+        ])
+        && data.ownerUid is string && data.ownerUid.size() <= 128
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'role', 40)
+        && isOptionalString(data, 'deviceId', 128)
+        && isOptionalMap(data, 'teacherAccount')
+        && isOptionalMap(data, 'adminAccount')
+        && isOptionalString(data, 'lastSyncedAt', 64)
+        && isOptionalString(data, 'updatedAt', 64)
+        && isOptionalMap(data, 'appData');
+    }
+
+    function isValidTeacher(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'uid', 'name', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'uid', 'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth',
+          'phone', 'mobileNumber', 'schoolName', 'schoolCode', 'academicYear',
+          'subject', 'primarySubject', 'standard', 'stream', 'section',
+          'assignedClass', 'teacherClassId', 'designation', 'isClassTeacher',
+          'avatar', 'photoUrl', 'role', 'status', 'accountStatus',
+          'createdAt', 'updatedAt', 'lastActiveAt', 'recentActivity',
+          'studentCount', 'attendanceCount', 'examCount'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.uid is string && data.uid.size() <= 128
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 150
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'fullName', 150)
+        && isOptionalString(data, 'email', 200)
+        && isOptionalString(data, 'gmail', 200)
+        && isOptionalString(data, 'dob', 32)
+        && isOptionalString(data, 'dateOfBirth', 32)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'mobileNumber', 40)
+        && isOptionalString(data, 'schoolName', 200)
+        && isOptionalString(data, 'academicYear', 32)
+        && isOptionalString(data, 'subject', 100)
+        && isOptionalString(data, 'primarySubject', 100)
+        && isOptionalString(data, 'standard', 80)
+        && isOptionalString(data, 'stream', 80)
+        && isOptionalString(data, 'section', 20)
+        && isOptionalString(data, 'assignedClass', 150)
+        && isOptionalString(data, 'teacherClassId', 128)
+        && isOptionalString(data, 'designation', 120)
+        && isOptionalBool(data, 'isClassTeacher')
+        && isOptionalString(data, 'avatar', 40)
+        && isOptionalString(data, 'photoUrl', 1500)
+        && isOptionalString(data, 'role', 40)
+        && isOptionalString(data, 'status', 40)
+        && isOptionalString(data, 'accountStatus', 40)
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64)
+        && isOptionalString(data, 'lastActiveAt', 64)
+        && isOptionalString(data, 'recentActivity', 500)
+        && isOptionalNumber(data, 'studentCount')
+        && isOptionalNumber(data, 'attendanceCount')
+        && isOptionalNumber(data, 'examCount');
+    }
+
+    function isValidEmailDirectory(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['uid', 'email', 'schoolCode', 'role'])
+        && data.keys().hasOnly([
+          'uid', 'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth',
+          'schoolCode', 'schoolName', 'name', 'phone', 'subject',
+          'assignedClass', 'designation', 'loginMethod', 'role',
+          'lastEntryAt', 'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() <= 128
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.role is string && data.role.size() <= 40
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'gmail', 200)
+        && isOptionalString(data, 'dob', 32)
+        && isOptionalString(data, 'dateOfBirth', 32)
+        && isOptionalString(data, 'schoolName', 200)
+        && isOptionalString(data, 'name', 150)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'subject', 100)
+        && isOptionalString(data, 'assignedClass', 150)
+        && isOptionalString(data, 'designation', 100)
+        && isOptionalString(data, 'loginMethod', 40)
+        && isOptionalString(data, 'lastEntryAt', 64)
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidSchoolRoot(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['schoolCode', 'schoolName'])
+        && data.keys().hasOnly(['schoolCode', 'schoolName', 'updatedAt'])
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 200
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidSchoolProfile(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['schoolName', 'schoolCode'])
+        && data.keys().hasOnly([
+          'schoolName', 'schoolAddress', 'schoolCode', 'schoolPhone',
+          'schoolEmail', 'principalName', 'principalPhone', 'designation'
+        ])
+        && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 200
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'schoolAddress', 400)
+        && isOptionalString(data, 'schoolPhone', 40)
+        && isOptionalString(data, 'schoolEmail', 200)
+        && isOptionalString(data, 'principalName', 150)
+        && isOptionalString(data, 'principalPhone', 40)
+        && isOptionalString(data, 'designation', 100);
+    }
+
+    function isValidSchoolClass(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'className', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'className', 'standard', 'stream', 'section', 'academicYear',
+          'classStrength', 'teacherId', 'teacherUid', 'teacherName', 'schoolCode',
+          'isTeacherCreated', 'createdByTeacherId', 'createdByTeacherEmail',
+          'attendanceCount', 'examCount', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.className is string && data.className.size() >= 1 && data.className.size() <= 150
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'standard', 80)
+        && isOptionalString(data, 'stream', 80)
+        && isOptionalString(data, 'section', 20)
+        && isOptionalString(data, 'academicYear', 32)
+        && isOptionalNumber(data, 'classStrength')
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherUid', 128)
+        && isOptionalString(data, 'teacherName', 150)
+        && isOptionalBool(data, 'isTeacherCreated')
+        && isOptionalString(data, 'createdByTeacherId', 128)
+        && isOptionalString(data, 'createdByTeacherEmail', 200)
+        && isOptionalNumber(data, 'attendanceCount')
+        && isOptionalNumber(data, 'examCount')
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidStudent(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'rollNo', 'name', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'rollNo', 'admissionNo', 'name', 'gender', 'classId',
+          'teacherId', 'teacherUid', 'schoolCode', 'phone', 'parentName',
+          'parentPhone', 'guardianPhone', 'division', 'dob', 'address',
+          'bloodGroup', 'notes', 'photoUrl', 'avatar', 'createdAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.rollNo is number
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 150
+        && data.schoolCode is string && data.schoolCode.size() >= 1 && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'admissionNo', 64)
+        && (!('gender' in data) || data.gender in ['male', 'female', 'other'])
+        && isOptionalString(data, 'classId', 128)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherUid', 128)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'parentName', 150)
+        && isOptionalString(data, 'parentPhone', 40)
+        && isOptionalString(data, 'guardianPhone', 40)
+        && isOptionalString(data, 'division', 40)
+        && isOptionalString(data, 'dob', 32)
+        && isOptionalString(data, 'address', 500)
+        && isOptionalString(data, 'bloodGroup', 16)
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalString(data, 'photoUrl', 1500)
+        && isOptionalString(data, 'avatar', 40)
+        && isOptionalString(data, 'createdAt', 64);
+    }
+
+    function isValidAttendance(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'date', 'classId', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'date', 'presentStudentIds', 'absentStudentIds', 'onDutyStudentIds',
+          'notes', 'savedAt', 'classId', 'teacherId', 'teacherUid', 'schoolCode'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.date is string && data.date.size() <= 32
+        && data.classId is string && data.classId.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalList(data, 'presentStudentIds', 500)
+        && isOptionalList(data, 'absentStudentIds', 500)
+        && isOptionalList(data, 'onDutyStudentIds', 500)
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalString(data, 'savedAt', 64)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherUid', 128);
+    }
+
+    function isValidExam(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'name', 'classId', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'name', 'type', 'date', 'academicYear', 'subjects',
+          'createdAt', 'classId', 'teacherId', 'teacherUid', 'schoolCode'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 150
+        && data.classId is string && data.classId.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'type', 64)
+        && isOptionalString(data, 'date', 32)
+        && isOptionalString(data, 'academicYear', 32)
+        && isOptionalList(data, 'subjects', 50)
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherUid', 128);
+    }
+
+    function isValidExamMarks(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['examId', 'marks', 'classId', 'schoolCode'])
+        && data.keys().hasOnly([
+          'examId', 'marks', 'updatedAt', 'classId', 'teacherId', 'teacherUid', 'schoolCode'
+        ])
+        && data.examId is string && data.examId.size() <= 128
+        && data.marks is map
+        && data.classId is string && data.classId.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'updatedAt', 64)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherUid', 128);
+    }
+
+    function isValidTimetable(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'day', 'periodNumber', 'subject', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'day', 'periodNumber', 'startTime', 'endTime', 'subject',
+          'subjectCode', 'className', 'classId', 'teacherId', 'teacherName',
+          'roomNumber', 'schoolCode', 'type', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+        && data.periodNumber is number && data.periodNumber >= 1 && data.periodNumber <= 20
+        && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 100
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'startTime', 32)
+        && isOptionalString(data, 'endTime', 32)
+        && isOptionalString(data, 'subjectCode', 20)
+        && isOptionalString(data, 'className', 150)
+        && isOptionalString(data, 'classId', 128)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'teacherName', 150)
+        && isOptionalString(data, 'roomNumber', 64)
+        && isOptionalString(data, 'type', 40)
+        && isOptionalString(data, 'notes', 500)
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    function isValidTimetablePref(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['schoolCode', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ownerUid', 'schoolCode', 'teacherId', 'includeSaturday',
+          'periodTimings', 'prefs', 'updatedAt'
+        ])
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64
+        && isOptionalString(data, 'ownerUid', 128)
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalBool(data, 'includeSaturday')
+        && isOptionalList(data, 'periodTimings', 24)
+        && isOptionalMap(data, 'prefs');
+    }
+
+    function isValidReminder(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'title', 'date', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'title', 'description', 'date', 'time', 'repeat',
+          'category', 'priority', 'isCompleted', 'ownerUid', 'schoolCode', 'createdAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.date is string && data.date.size() <= 32
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'description', 1000)
+        && isOptionalString(data, 'time', 32)
+        && (!('repeat' in data) || data.repeat in ['none', 'daily', 'weekly', 'monthly'])
+        && (!('category' in data) || data.category in ['attendance', 'exam', 'marks', 'meeting', 'general'])
+        && (!('priority' in data) || data.priority in ['low', 'medium', 'high'])
+        && isOptionalBool(data, 'isCompleted')
+        && isOptionalString(data, 'ownerUid', 128)
+        && isOptionalString(data, 'createdAt', 64);
+    }
+
+    function isValidBroadcast(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'schoolCode', 'senderName', 'title', 'message', 'priority'])
+        && data.keys().hasOnly([
+          'id', 'schoolCode', 'senderUid', 'senderName', 'title', 'message',
+          'priority', 'category', 'targetAudience', 'date', 'time', 'createdAt'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.senderName is string && data.senderName.size() <= 150
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 2000
+        && data.priority in ['normal', 'high', 'urgent']
+        && isOptionalString(data, 'senderUid', 128)
+        && isOptionalString(data, 'category', 40)
+        && isOptionalString(data, 'targetAudience', 100)
+        && isOptionalString(data, 'date', 32)
+        && isOptionalString(data, 'time', 32)
+        && isOptionalString(data, 'createdAt', 64);
+    }
+
+    function isValidActivity(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'schoolCode', 'teacherName', 'description', 'timestamp'])
+        && data.keys().hasOnly([
+          'id', 'schoolCode', 'teacherId', 'teacherName', 'subject',
+          'assignedClass', 'activityType', 'description', 'timestamp'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.teacherName is string && data.teacherName.size() <= 150
+        && data.description is string && data.description.size() <= 500
+        && data.timestamp is string && data.timestamp.size() <= 64
+        && isOptionalString(data, 'teacherId', 128)
+        && isOptionalString(data, 'subject', 100)
+        && isOptionalString(data, 'assignedClass', 150)
+        && isOptionalString(data, 'activityType', 40);
+    }
+
+    function isValidAuditLog(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'timestamp', 'user', 'role', 'action', 'status'])
+        && data.keys().hasOnly([
+          'id', 'schoolCode', 'timestamp', 'user', 'role', 'action',
+          'target', 'details', 'status'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.timestamp is string && data.timestamp.size() <= 64
+        && data.user is string && data.user.size() <= 200
+        && data.role is string && data.role.size() <= 64
+        && data.action is string && data.action.size() <= 200
+        && data.status in ['SUCCESS', 'DENIED', 'INFO', 'WARNING', 'ERROR']
+        && isOptionalString(data, 'schoolCode', 64)
+        && isOptionalString(data, 'target', 200)
+        && isOptionalString(data, 'details', 1000);
+    }
+
+    function isValidLoginActivity(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'schoolCode', 'email', 'role', 'success', 'timestamp'])
+        && data.keys().hasOnly([
+          'id', 'schoolCode', 'email', 'accessMethod', 'role', 'success',
+          'details', 'timestamp', 'activityType'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.email is string && data.email.size() <= 200
+        && data.role is string && data.role.size() <= 40
+        && data.success is bool
+        && data.timestamp is string && data.timestamp.size() <= 64
+        && isOptionalString(data, 'accessMethod', 80)
+        && isOptionalString(data, 'details', 500)
+        && isOptionalString(data, 'activityType', 40);
+    }
+
+    function isValidCloudFile(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['id', 'ownerUid', 'fileName', 'storagePath', 'downloadUrl', 'schoolCode'])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'fileName', 'fileType', 'contentType', 'category',
+          'entityId', 'storagePath', 'downloadUrl', 'size', 'email', 'schoolCode',
+          'uploadedBy', 'uploadedAt', 'createdAt', 'updatedAt', 'description'
+        ])
+        && data.id is string && data.id.size() <= 128
+        && data.ownerUid is string && data.ownerUid.size() <= 128
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255
+        && data.storagePath is string && data.storagePath.size() >= 1 && data.storagePath.size() <= 500
+        && data.downloadUrl is string && data.downloadUrl.size() >= 1 && data.downloadUrl.size() <= 1500
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && isOptionalString(data, 'fileType', 100)
+        && isOptionalString(data, 'contentType', 100)
+        && isOptionalString(data, 'category', 64)
+        && isOptionalString(data, 'entityId', 128)
+        && isOptionalNumber(data, 'size')
+        && isOptionalString(data, 'email', 200)
+        && isOptionalString(data, 'uploadedBy', 150)
+        && isOptionalString(data, 'uploadedAt', 64)
+        && isOptionalString(data, 'createdAt', 64)
+        && isOptionalString(data, 'updatedAt', 64)
+        && isOptionalString(data, 'description', 500);
+    }
+
+    function isValidFcmToken(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['token', 'userUid', 'schoolCode', 'platform'])
+        && data.keys().hasOnly([
+          'token', 'platform', 'userUid', 'schoolCode', 'role',
+          'preferences', 'updatedAt', 'userAgent'
+        ])
+        && data.token is string && data.token.size() >= 1 && data.token.size() <= 512
+        && data.userUid is string && data.userUid.size() <= 128
+        && data.schoolCode is string && data.schoolCode.size() <= 64
+        && data.platform in ['web', 'android']
+        && isOptionalString(data, 'role', 40)
+        && isOptionalMap(data, 'preferences')
+        && isOptionalString(data, 'updatedAt', 64)
+        && isOptionalString(data, 'userAgent', 500);
+    }
+
+    function isValidNotificationPref(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['enabled', 'updatedAt'])
+        && data.keys().hasOnly([
+          'enabled', 'notices', 'exams', 'holidays', 'assignments',
+          'messages', 'accountUpdates', 'soundEnabled', 'updatedAt'
+        ])
+        && data.enabled is bool
+        && data.updatedAt is string && data.updatedAt.size() <= 64
+        && isOptionalBool(data, 'notices')
+        && isOptionalBool(data, 'exams')
+        && isOptionalBool(data, 'holidays')
+        && isOptionalBool(data, 'assignments')
+        && isOptionalBool(data, 'messages')
+        && isOptionalBool(data, 'accountUpdates')
+        && isOptionalBool(data, 'soundEnabled');
+    }
+
+    function isValidDeletedMarker(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['deletedAt'])
+        && data.keys().hasOnly(['id', 'uid', 'email', 'temporarilyDeleted', 'permanentlyDeleted', 'deletedAt'])
+        && data.deletedAt is string && data.deletedAt.size() <= 64
+        && isOptionalString(data, 'id', 128)
+        && isOptionalString(data, 'uid', 128)
+        && isOptionalString(data, 'email', 200)
+        && isOptionalBool(data, 'temporarilyDeleted')
+        && isOptionalBool(data, 'permanentlyDeleted');
+    }
+
+    function isValidUnauthorizedAttempt(data) {
+      return hasNoPasswordField(data)
+        && data.keys().hasAll(['attemptedEmail', 'reason', 'timestamp'])
+        && data.keys().hasOnly(['attemptedEmail', 'enteredSchoolCode', 'reason', 'timestamp'])
+        && data.attemptedEmail is string && data.attemptedEmail.size() <= 200
+        && data.reason is string && data.reason.size() <= 200
+        && data.timestamp is string && data.timestamp.size() <= 64
+        && isOptionalString(data, 'enteredSchoolCode', 64);
+    }
+
+    // ------------------------------------------------------------------------
+    // Connection Probe
+    // ------------------------------------------------------------------------
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+    }
+
+    // ------------------------------------------------------------------------
+    // User Identity & RBAC Collections
+    // ------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isSignedIn() && (existing().userId == request.auth.uid || existing().uid == request.auth.uid || isAdmin());
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming())
+        && (incoming().role == 'teacher' || isVerifiedAdminEmail());
+      allow update: if isValidId(userId) && isSignedIn() && isValidUser(incoming()) && (
+        isAdmin() ||
+        (isOwner(userId)
+          && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'userId', 'uid', 'createdAt']))
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isValidAdmin(incoming()) && isVerifiedAdminEmail();
+      allow update: if isValidId(userId) && isValidAdmin(incoming()) && (
+        isAdmin() ||
+        (isOwner(userId) && isVerifiedAdminEmail() && incoming().role == existing().role)
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /schoolAdmins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isValidAdmin(incoming()) && isAdmin();
+      allow update: if isValidId(userId) && isValidAdmin(incoming()) && isAdmin();
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /email_accounts/{emailKey} {
+      allow get: if isValidKey(emailKey) && isSignedIn() && (resource == null || existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow create: if isValidKey(emailKey) && isSignedIn() && isValidEmailAccount(incoming())
+        && incoming().ownerUid == request.auth.uid;
+      allow update: if isValidKey(emailKey) && isSignedIn() && isValidEmailAccount(incoming()) && (
+        isAdmin() ||
+        (existing().ownerUid == request.auth.uid
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'schoolCode', 'role', 'deviceId', 'teacherAccount', 'adminAccount', 'lastSyncedAt', 'updatedAt', 'appData']))
+      );
+      allow delete: if isValidKey(emailKey) && isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+
+    match /teachers/{teacherId} {
+      allow get: if isValidId(teacherId) && (isOwner(teacherId) || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow create: if isValidId(teacherId) && isOwner(teacherId) && isValidTeacher(incoming()) && incoming().uid == request.auth.uid;
+      allow update: if isValidId(teacherId) && isSignedIn() && isValidTeacher(incoming()) && (
+        isAdmin() ||
+        (isOwner(teacherId)
+          && incoming().uid == existing().uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
+            'schoolName', 'schoolCode', 'academicYear', 'subject', 'primarySubject',
+            'standard', 'stream', 'section', 'assignedClass', 'teacherClassId', 'designation',
+            'isClassTeacher', 'avatar', 'photoUrl', 'status', 'accountStatus',
+            'updatedAt', 'lastActiveAt', 'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
+          ]))
+      );
+      allow delete: if isValidId(teacherId) && (isOwner(teacherId) || isAdmin());
+    }
+
+    match /teacherSignups/{teacherId} {
+      allow get: if isValidId(teacherId) && (isOwner(teacherId) || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow create: if isValidId(teacherId) && isOwner(teacherId) && isValidTeacher(incoming()) && incoming().uid == request.auth.uid;
+      allow update: if isValidId(teacherId) && isSignedIn() && isValidTeacher(incoming()) && (
+        isAdmin() ||
+        (isOwner(teacherId)
+          && incoming().uid == existing().uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
+            'schoolName', 'schoolCode', 'academicYear', 'subject', 'primarySubject',
+            'standard', 'stream', 'section', 'assignedClass', 'teacherClassId', 'designation',
+            'isClassTeacher', 'avatar', 'photoUrl', 'status', 'accountStatus',
+            'updatedAt', 'lastActiveAt', 'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
+          ]))
+      );
+      allow delete: if isValidId(teacherId) && (isOwner(teacherId) || isAdmin());
+    }
+
+    match /gmail/{emailKey} {
+      allow get: if isValidKey(emailKey) && isSignedIn() && (resource == null || existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow create: if isValidKey(emailKey) && isSignedIn() && isValidEmailDirectory(incoming()) && (incoming().uid == request.auth.uid || isAdmin());
+      allow update: if isValidKey(emailKey) && isSignedIn() && isValidEmailDirectory(incoming()) && (
+        isAdmin() ||
+        (existing().uid == request.auth.uid
+          && incoming().uid == existing().uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth', 'schoolCode',
+            'schoolName', 'name', 'phone', 'subject', 'assignedClass',
+            'designation', 'loginMethod', 'lastEntryAt', 'updatedAt'
+          ]))
+      );
+      allow delete: if isValidKey(emailKey) && isAdmin();
+    }
+
+    match /teacher_credentials/{emailKey} {
+      allow get: if isValidKey(emailKey) && isSignedIn() && (resource == null || existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow create: if isValidKey(emailKey) && isSignedIn() && isValidEmailDirectory(incoming()) && (incoming().uid == request.auth.uid || isAdmin());
+      allow update: if isValidKey(emailKey) && isSignedIn() && isValidEmailDirectory(incoming()) && (
+        isAdmin() ||
+        (existing().uid == request.auth.uid
+          && incoming().uid == existing().uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth', 'schoolCode',
+            'schoolName', 'name', 'phone', 'subject', 'assignedClass',
+            'designation', 'loginMethod', 'lastEntryAt', 'updatedAt'
+          ]))
+      );
+      allow delete: if isValidKey(emailKey) && isAdmin();
+    }
+
+    match /admin_credentials/{emailKey} {
+      allow get: if isValidKey(emailKey) && isSignedIn() && (isAdmin() || (resource != null && existing().uid == request.auth.uid));
+      allow list: if isAdmin();
+      allow create: if isValidKey(emailKey) && isValidEmailDirectory(incoming()) && isAdmin();
+      allow update: if isValidKey(emailKey) && isValidEmailDirectory(incoming()) && isAdmin();
+      allow delete: if isValidKey(emailKey) && isAdmin();
+    }
+
+    match /cloud_files/{fileId} {
+      allow get: if isValidId(fileId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isSchoolMemberOrAdmin(existing().schoolCode));
+      allow list: if isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow create: if isValidId(fileId) && isSignedIn() && isValidCloudFile(incoming()) && incoming().ownerUid == request.auth.uid;
+      allow update: if isValidId(fileId) && isSignedIn() && isValidCloudFile(incoming()) && (
+        isAdmin() ||
+        (existing().ownerUid == request.auth.uid
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'fileName', 'fileType', 'contentType', 'category', 'entityId',
+            'storagePath', 'downloadUrl', 'size', 'updatedAt', 'description'
+          ]))
+      );
+      allow delete: if isValidId(fileId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+
+    match /broadcasts/{broadcastId} {
+      allow get: if isValidId(broadcastId) && isSignedIn() && isSchoolMemberOrAdmin(existing().schoolCode);
+      allow list: if isSignedIn() && (isAdmin() || isUserInSchool(existing().schoolCode));
+      allow create, update: if isValidId(broadcastId) && isValidBroadcast(incoming()) && isAdmin();
+      allow delete: if isValidId(broadcastId) && isAdmin();
+    }
+
+    match /notification_preferences/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if false;
+      allow create, update: if isValidId(userId) && isOwner(userId) && isValidNotificationPref(incoming());
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+    }
+
+    match /fcm_tokens/{userId}/tokens/{tokenId} {
+      allow get: if isValidId(userId) && isValidId(tokenId) && (isOwner(userId) || isAdmin());
+      allow list: if isSignedIn() && (existing().userUid == request.auth.uid || isAdmin());
+      allow create, update: if isValidId(userId) && isValidId(tokenId) && isOwner(userId) && isValidFcmToken(incoming()) && incoming().userUid == request.auth.uid;
+      allow delete: if isValidId(userId) && isValidId(tokenId) && (isOwner(userId) || isAdmin());
+    }
+
+    match /unauthorizedAttempts/{attemptId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(attemptId) && isSignedIn() && isValidUnauthorizedAttempt(incoming());
+      allow update, delete: if isValidId(attemptId) && isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // School Multi-Tenant Scope (/schools/{schoolCode}/...)
+    // ------------------------------------------------------------------------
     match /schools/{schoolCode} {
-      allow read, write: if true;
+      allow get: if isValidKey(schoolCode) && isSchoolMemberOrAdmin(schoolCode);
+      allow list: if isAdmin();
+      allow create, update: if isValidKey(schoolCode) && isValidSchoolRoot(incoming()) && isSchoolMemberOrAdmin(schoolCode);
+      allow delete: if isValidKey(schoolCode) && isAdmin();
+
+      match /schoolProfile/{docId} {
+        allow get: if isValidKey(schoolCode) && isValidId(docId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(docId) && isValidSchoolProfile(incoming()) && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(docId) && isAdmin();
+      }
+
+      match /schoolAdmins/{adminId} {
+        allow get: if isValidKey(schoolCode) && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+        allow list: if isAdmin();
+        allow create, update: if isValidKey(schoolCode) && isValidId(adminId) && isValidAdmin(incoming()) && isAdmin();
+        allow delete: if isValidKey(schoolCode) && isValidId(adminId) && isAdmin();
+      }
 
       match /teachers/{teacherId} {
-        allow read, write: if true;
+        allow get: if isValidKey(schoolCode) && isValidId(teacherId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSignedIn() && existing().schoolCode == schoolCode && (isAdmin() || (isUserInSchool(schoolCode) && existing().uid == request.auth.uid));
+        allow create: if isValidKey(schoolCode) && isValidId(teacherId) && isValidTeacher(incoming())
+          && ((isOwner(teacherId) && incoming().uid == request.auth.uid && incoming().schoolCode == schoolCode) || isAdmin());
+        allow update: if isValidKey(schoolCode) && isValidId(teacherId) && isValidTeacher(incoming()) && (
+          isAdmin() ||
+          (isOwner(teacherId)
+            && incoming().uid == existing().uid
+            && incoming().schoolCode == existing().schoolCode
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
+              'schoolName', 'academicYear', 'subject', 'primarySubject', 'standard', 'stream',
+              'section', 'assignedClass', 'teacherClassId', 'designation', 'isClassTeacher',
+              'avatar', 'photoUrl', 'status', 'accountStatus', 'updatedAt', 'lastActiveAt',
+              'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
+            ]))
+        );
+        allow delete: if isValidKey(schoolCode) && isValidId(teacherId) && isAdmin();
       }
 
       match /teacherSignups/{teacherId} {
-        allow read, write: if true;
-      }
-
-      match /activities/{activityId} {
-        allow read, write: if true;
+        allow get: if isValidKey(schoolCode) && isValidId(teacherId) && (isOwner(teacherId) || isAdmin());
+        allow list: if isSignedIn() && existing().schoolCode == schoolCode && (isAdmin() || (isUserInSchool(schoolCode) && existing().uid == request.auth.uid));
+        allow create: if isValidKey(schoolCode) && isValidId(teacherId) && isValidTeacher(incoming())
+          && ((isOwner(teacherId) && incoming().uid == request.auth.uid) || isAdmin());
+        allow update: if isValidKey(schoolCode) && isValidId(teacherId) && isValidTeacher(incoming()) && (
+          isAdmin() ||
+          (isOwner(teacherId)
+            && incoming().uid == existing().uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
+              'schoolName', 'schoolCode', 'academicYear', 'subject', 'primarySubject',
+              'standard', 'stream', 'section', 'assignedClass', 'teacherClassId', 'designation',
+              'isClassTeacher', 'avatar', 'photoUrl', 'status', 'accountStatus',
+              'updatedAt', 'lastActiveAt', 'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
+            ]))
+        );
+        allow delete: if isValidKey(schoolCode) && isValidId(teacherId) && isAdmin();
       }
 
       match /classes/{classId} {
-        allow read, write: if true;
+        allow get: if isValidKey(schoolCode) && isValidId(classId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(classId) && isValidSchoolClass(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(classId) && (isAdmin() || (isUserInSchool(schoolCode) && existing().teacherUid == request.auth.uid));
 
         match /students/{studentId} {
-          allow read, write: if true;
+          allow get: if isValidKey(schoolCode) && isValidId(classId) && isValidId(studentId) && isSchoolMemberOrAdmin(schoolCode);
+          allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+          allow create, update: if isValidKey(schoolCode) && isValidId(classId) && isValidId(studentId) && isValidStudent(incoming())
+            && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+          allow delete: if isValidKey(schoolCode) && isValidId(classId) && isValidId(studentId) && isSchoolMemberOrAdmin(schoolCode);
         }
 
         match /attendance/{attendanceId} {
-          allow read, write: if true;
+          allow get: if isValidKey(schoolCode) && isValidId(classId) && isValidId(attendanceId) && isSchoolMemberOrAdmin(schoolCode);
+          allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+          allow create, update: if isValidKey(schoolCode) && isValidId(classId) && isValidId(attendanceId) && isValidAttendance(incoming())
+            && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+          allow delete: if isValidKey(schoolCode) && isValidId(classId) && isValidId(attendanceId) && isSchoolMemberOrAdmin(schoolCode);
         }
 
         match /exams/{examId} {
-          allow read, write: if true;
+          allow get: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isSchoolMemberOrAdmin(schoolCode);
+          allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+          allow create, update: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isValidExam(incoming())
+            && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+          allow delete: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isSchoolMemberOrAdmin(schoolCode);
+        }
+
+        match /examMarks/{examId} {
+          allow get: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isSchoolMemberOrAdmin(schoolCode);
+          allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+          allow create, update: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isValidExamMarks(incoming())
+            && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+          allow delete: if isValidKey(schoolCode) && isValidId(classId) && isValidId(examId) && isSchoolMemberOrAdmin(schoolCode);
         }
       }
 
       match /students/{studentId} {
-        allow read, write: if true;
+        allow get: if isValidKey(schoolCode) && isValidId(studentId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(studentId) && isValidStudent(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(studentId) && isSchoolMemberOrAdmin(schoolCode);
       }
 
-      match /{allSubcollections=**} {
-        allow read, write: if true;
+      match /timetables/{slotId} {
+        allow get: if isValidKey(schoolCode) && isValidId(slotId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(slotId) && isValidTimetable(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(slotId) && isSchoolMemberOrAdmin(schoolCode);
       }
-    }
 
-    match /users/{userId} {
-      allow read, write: if true;
-
-      match /{allSubcollections=**} {
-        allow read, write: if true;
+      match /timetablePrefs/{prefId} {
+        allow get: if isValidKey(schoolCode) && isValidId(prefId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(prefId) && isValidTimetablePref(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(prefId) && (isAdmin() || (isUserInSchool(schoolCode) && existing().ownerUid == request.auth.uid));
       }
-    }
 
-    match /email_accounts/{emailKey} {
-      allow read, write: if true;
-
-      match /{allSubcollections=**} {
-        allow read, write: if true;
+      match /reminders/{reminderId} {
+        allow get: if isValidKey(schoolCode) && isValidId(reminderId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(reminderId) && isValidReminder(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(reminderId) && isSchoolMemberOrAdmin(schoolCode);
       }
-    }
 
-    match /teachers/{teacherId} {
-      allow read, write: if true;
-    }
+      match /broadcasts/{broadcastId} {
+        allow get: if isValidKey(schoolCode) && isValidId(broadcastId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(broadcastId) && isValidBroadcast(incoming())
+          && incoming().schoolCode == schoolCode && isAdmin();
+        allow delete: if isValidKey(schoolCode) && isValidId(broadcastId) && isAdmin();
+      }
 
-    match /teacherSignups/{teacherId} {
-      allow read, write: if true;
-    }
+      match /activities/{activityId} {
+        allow get: if isValidKey(schoolCode) && isValidId(activityId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isSchoolMemberOrAdmin(schoolCode) && existing().schoolCode == schoolCode;
+        allow create, update: if isValidKey(schoolCode) && isValidId(activityId) && isValidActivity(incoming())
+          && incoming().schoolCode == schoolCode && isSchoolMemberOrAdmin(schoolCode);
+        allow delete: if isValidKey(schoolCode) && isValidId(activityId) && isAdmin();
+      }
 
-    match /gmail/{emailKey} {
-      allow read, write: if true;
-    }
+      match /auditLogs/{logId} {
+        allow get: if isValidKey(schoolCode) && isValidId(logId) && isAdmin();
+        allow list: if isAdmin();
+        allow create, update: if isValidKey(schoolCode) && isValidId(logId) && isValidAuditLog(incoming()) && isAdmin();
+        allow delete: if isValidKey(schoolCode) && isValidId(logId) && isAdmin();
+      }
 
-    match /schoolAdmins/{adminId} {
-      allow read, write: if true;
-    }
+      match /loginActivities/{actId} {
+        allow get: if isValidKey(schoolCode) && isValidId(actId) && isAdmin();
+        allow list: if isAdmin();
+        allow create: if isValidKey(schoolCode) && isValidId(actId) && isValidLoginActivity(incoming()) && isSchoolMemberOrAdmin(schoolCode);
+        allow update, delete: if isValidKey(schoolCode) && isValidId(actId) && isAdmin();
+      }
 
-    match /broadcasts/{broadcastId} {
-      allow read, write: if true;
-    }
+      match /tokens/{userId} {
+        allow get: if isValidKey(schoolCode) && isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin();
+        allow create, update: if isValidKey(schoolCode) && isValidId(userId) && isOwner(userId) && isValidFcmToken(incoming()) && incoming().userUid == request.auth.uid;
+        allow delete: if isValidKey(schoolCode) && isValidId(userId) && (isOwner(userId) || isAdmin());
+      }
 
-    match /cloud_files/{fileId} {
-      allow read, write: if true;
-    }
+      match /temporarilyDeletedTeachers/{teacherId} {
+        allow get: if isValidKey(schoolCode) && isValidId(teacherId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isAdmin();
+        allow create, update: if isValidKey(schoolCode) && isValidId(teacherId) && isValidDeletedMarker(incoming()) && isAdmin();
+        allow delete: if isValidKey(schoolCode) && isValidId(teacherId) && isAdmin();
+      }
 
-    match /test/{docId} {
-      allow read, write: if true;
+      match /permanentlyDeletedTeachers/{teacherId} {
+        allow get: if isValidKey(schoolCode) && isValidId(teacherId) && isSchoolMemberOrAdmin(schoolCode);
+        allow list: if isAdmin();
+        allow create, update: if isValidKey(schoolCode) && isValidId(teacherId) && isValidDeletedMarker(incoming()) && isAdmin();
+        allow delete: if isValidKey(schoolCode) && isValidId(teacherId) && isAdmin();
+      }
     }
   }
 }

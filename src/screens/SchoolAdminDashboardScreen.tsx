@@ -77,7 +77,7 @@ import {
   TeacherActivityItem
 } from '../types';
 import { StorageService, DEFAULT_PERIOD_TIMINGS, TIMETABLE_DAYS, registerStorageMutationListener, parseDateOfBirth } from '../utils/storage';
-import { db, database, ref, update, onValue, doc, setDoc, handleFirestoreError, OperationType, auth, firestore, fsCollection, fsOnSnapshot } from '../utils/firebase';
+import { database, ref, update, onValue, firestore, fsCollection, fsOnSnapshot, handleFirestoreError, OperationType, auth, uploadFileToFirebaseStorage } from '../utils/firebase';
 import { CloudSync } from '../utils/cloudSync';
 import {
   generateSchoolAdminAuditPDF,
@@ -197,7 +197,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
 
   // Editable School Profile in Admin Mode
   const [schoolProfile, setSchoolProfile] = useState<SchoolProfile>(() => StorageService.getSchoolProfile());
-  const [adminPin, setAdminPin] = useState(admin?.adminPassword || '');
+  const [adminPin, setAdminPin] = useState('');
   const [adminName, setAdminName] = useState(admin?.adminName || StorageService.getSchoolProfile().principalName || '');
   const [adminPhone, setAdminPhone] = useState(admin?.phone || '');
   const [adminEmail, setAdminEmail] = useState(admin?.email || '');
@@ -509,7 +509,6 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
         name: String(raw.name || raw.fullName || existing?.name || 'Teacher').trim(),
         email: cleanEmail || existing?.email || '',
         gmail: cleanEmail || existing?.gmail || '',
-        password: raw.password || existing?.password || '',
         dob: String(raw.dob || raw.dateOfBirth || existing?.dob || '').trim(),
         phone: String(raw.phone || raw.mobileNumber || existing?.phone || '').trim(),
         photoUrl: raw.photoUrl || existing?.photoUrl || '',
@@ -1060,7 +1059,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     const admins = StorageService.getSchoolAdmins();
     const idx = admins.findIndex(a => a.id === admin.id || a.schoolCode === admin.schoolCode);
     if (idx >= 0) {
-      admins[idx].adminPassword = adminPin;
+      delete admins[idx].adminPassword;
       admins[idx].adminName = adminName.trim();
       admins[idx].phone = adminPhone;
       admins[idx].email = adminEmail;
@@ -1069,7 +1068,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       StorageService.saveSchoolAdmins(admins);
     }
 
-    showToast('School Profile and Admin PIN updated successfully!');
+    showToast('School Profile updated successfully!');
     triggerRefresh();
   };
 
@@ -1095,11 +1094,9 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     };
 
     StorageService.addPrincipalBroadcast(newBroadcast);
-    await CloudSync.saveBroadcastToSchool(activeSchoolCode, newBroadcast);
 
     try {
-      const docRef = doc(db, 'broadcasts', newBroadcast.id);
-      await setDoc(docRef, newBroadcast);
+      await CloudSync.saveBroadcastToSchool(activeSchoolCode, newBroadcast);
 
       const catMap: Record<string, any> = {
         holiday: 'holidays',
@@ -1121,11 +1118,11 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       showToast('Broadcast directive sent and synchronized with Cloud!');
     } catch (err) {
       try {
-        handleFirestoreError(err, OperationType.WRITE, `broadcasts/${newBroadcast.id}`);
+        handleFirestoreError(err, OperationType.WRITE, `schools/${activeSchoolCode}/broadcasts/${newBroadcast.id}`);
       } catch (logErr) {
-        console.warn('Firestore write warning:', logErr);
+        console.warn('Firestore broadcast write warning:', logErr);
       }
-      showToast('Broadcast saved locally (cloud sync will retry when online)');
+      showToast('Failed to publish broadcast to Firestore. Please verify permissions.');
     }
 
     setBroadcastTitle('');
@@ -1143,7 +1140,6 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   const handleSendBirthdayGreeting = async (teacher: TeacherAccount) => {
     const greetingMessage = `🎉 Warm Birthday Greetings from the Principal & Management of ${schoolProfile.schoolName}! Wishing you a wonderful year of health, happiness, and continued excellence in education.`;
     
-    // Create a broadcast/reminder specifically for teacher's birthday
     const bdayBroadcast: PrincipalBroadcast = {
       id: `bday-${Date.now()}`,
       schoolCode: admin.schoolCode,
@@ -1160,8 +1156,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     StorageService.addPrincipalBroadcast(bdayBroadcast);
 
     try {
-      const docRef = doc(db, 'broadcasts', bdayBroadcast.id);
-      await setDoc(docRef, bdayBroadcast);
+      await CloudSync.saveBroadcastToSchool(activeSchoolCode, bdayBroadcast);
 
       sendSchoolNotification({
         schoolCode: admin.schoolCode,
@@ -1173,14 +1168,13 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       showToast(`Birthday wishes sent to ${teacher.name}!`);
     } catch (err) {
       try {
-        handleFirestoreError(err, OperationType.WRITE, `broadcasts/${bdayBroadcast.id}`);
+        handleFirestoreError(err, OperationType.WRITE, `schools/${activeSchoolCode}/broadcasts/${bdayBroadcast.id}`);
       } catch (logErr) {
         console.warn('Firestore write warning:', logErr);
       }
-      showToast(`Birthday greeting recorded locally for ${teacher.name}.`);
+      showToast(`Failed to sync birthday greeting for ${teacher.name}.`);
     }
 
-    // Try Web Notification if supported
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
         new Notification(`🎂 Birthday Greeting Sent!`, {
@@ -1192,7 +1186,6 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       }
     }
 
-    showToast(`Birthday Greeting published and notified for ${teacher.name}!`);
     triggerRefresh();
   };
 
@@ -1220,6 +1213,17 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+
+    if (auth?.currentUser) {
+      uploadFileToFirebaseStorage({
+        file: blob,
+        fileName: filename,
+        category: 'backups',
+        schoolCode: activeSchoolCode,
+        description: `Complete School Admin JSON backup (${activeSchoolCode})`
+      }).catch(err => console.warn('Cloud Storage school backup upload note:', err));
+    }
+
     showToast(`Complete School Backup exported (${filename})`);
   };
 
@@ -1482,22 +1486,46 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     triggerRefresh();
   };
 
-  const handleQuickPhotoChange = (teacherId: string, file: File) => {
+  const handleQuickPhotoChange = async (teacherId: string, file: File) => {
+    const teacher = teachers.find(t => t.id === teacherId);
+    if (!teacher) return;
+
+    if (auth?.currentUser) {
+      try {
+        const uploaded = await uploadFileToFirebaseStorage({
+          file,
+          fileName: file.name || `teacher-${teacherId}.jpg`,
+          category: 'teachers',
+          schoolCode: activeSchoolCode,
+          entityId: teacherId,
+          description: `Teacher profile photo (${teacher.name})`
+        });
+        const updatedTeacher = {
+          ...teacher,
+          photoUrl: uploaded.downloadUrl
+        };
+        StorageService.updateTeacherAccount(updatedTeacher);
+        await CloudSync.saveTeacherToSchool(admin.schoolCode, updatedTeacher);
+        showToast(`Profile photo uploaded and synced for ${teacher.name}!`);
+        triggerRefresh();
+        return;
+      } catch (err) {
+        console.warn('Cloud Storage quick teacher photo upload note:', err);
+      }
+    }
+
     const reader = new FileReader();
     reader.onload = (e) => {
       const base64 = e.target?.result as string;
       if (base64) {
-        const teacher = teachers.find(t => t.id === teacherId);
-        if (teacher) {
-          const updatedTeacher = {
-            ...teacher,
-            photoUrl: base64
-          };
-          StorageService.updateTeacherAccount(updatedTeacher);
-          CloudSync.saveTeacherToSchool(admin.schoolCode, updatedTeacher).catch(() => {});
-          showToast(`Profile photo updated for ${teacher.name}!`);
-          triggerRefresh();
-        }
+        const updatedTeacher = {
+          ...teacher,
+          photoUrl: base64
+        };
+        StorageService.updateTeacherAccount(updatedTeacher);
+        CloudSync.saveTeacherToSchool(admin.schoolCode, updatedTeacher).catch(() => {});
+        showToast(`Profile photo updated for ${teacher.name}!`);
+        triggerRefresh();
       }
     };
     reader.readAsDataURL(file);
@@ -1677,7 +1705,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     reader.readAsText(file);
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     if (!importJsonText) {
       showToast('Please select a valid backup JSON file first.');
       return;
@@ -1685,6 +1713,20 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
 
     const res = StorageService.importCompleteSchoolData(importJsonText);
     if (res.success) {
+      if (auth?.currentUser) {
+        CloudSync.saveSchoolProfileToSchool(activeSchoolCode, StorageService.getSchoolProfile()).catch(() => {});
+        CloudSync.pushToCloud(auth.currentUser).catch(err =>
+          console.warn('Firestore school backup import push note:', err)
+        );
+        const blob = new Blob([importJsonText], { type: 'application/json' });
+        uploadFileToFirebaseStorage({
+          file: blob,
+          fileName: `School_Admin_Restore_${activeSchoolCode}_${Date.now()}.json`,
+          category: 'backups',
+          schoolCode: activeSchoolCode,
+          description: `Imported School Admin JSON backup (${activeSchoolCode})`
+        }).catch(() => {});
+      }
       showToast(res.message);
       setImportJsonText('');
       setImportPreview(null);
@@ -4217,14 +4259,13 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
 
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      School Admin Password / PIN *
+                      School Admin Password / PIN
                     </label>
                     <input
-                      type="text"
-                      required
+                      type="password"
                       value={adminPin}
                       onChange={e => setAdminPin(e.target.value)}
-                      placeholder="e.g. 1234"
+                      placeholder="Managed via Firebase Auth"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-[#0F1115] border border-[#2D3139] text-sm text-white font-mono focus:outline-none focus:border-amber-500"
                     />
                   </div>
@@ -5292,18 +5333,34 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
                         type="file"
                         accept="image/*"
                         className="hidden"
-                        onChange={(e) => {
+                        onChange={async (e) => {
                           const file = e.target.files?.[0];
-                          if (file) {
-                            const reader = new FileReader();
-                            reader.onload = (ev) => {
-                              const base64 = ev.target?.result as string;
-                              if (base64) {
-                                setTeacherFormData(f => ({ ...f, photoUrl: base64 }));
-                              }
-                            };
-                            reader.readAsDataURL(file);
+                          if (!file) return;
+                          const entityId = editingTeacher?.uid || editingTeacher?.id || `teach-${Date.now()}`;
+                          if (auth?.currentUser) {
+                            try {
+                              const uploaded = await uploadFileToFirebaseStorage({
+                                file,
+                                fileName: file.name || `teacher-${entityId}.jpg`,
+                                category: 'teachers',
+                                schoolCode: activeSchoolCode,
+                                entityId,
+                                description: `Teacher profile photo (${teacherFormData.name || entityId})`
+                              });
+                              setTeacherFormData(f => ({ ...f, photoUrl: uploaded.downloadUrl }));
+                              return;
+                            } catch (err) {
+                              console.warn('Cloud Storage modal teacher photo upload note:', err);
+                            }
                           }
+                          const reader = new FileReader();
+                          reader.onload = (ev) => {
+                            const base64 = ev.target?.result as string;
+                            if (base64) {
+                              setTeacherFormData(f => ({ ...f, photoUrl: base64 }));
+                            }
+                          };
+                          reader.readAsDataURL(file);
                         }}
                       />
                     </label>

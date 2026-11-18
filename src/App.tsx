@@ -195,21 +195,29 @@ export function App() {
               const schoolProfile = StorageService.getSchoolProfile();
               await CloudSync.restoreTeacherClassroom(firebaseUser.uid, firebaseUser.email || undefined, schoolProfile.schoolCode);
             } else {
-              // Pull latest cloud state
               await CloudSync.fetchFromCloud(firebaseUser);
             }
             const activeTeacher = StorageService.getAuthSession().currentTeacher;
             const activeClass = StorageService.getActiveClassId(activeTeacher?.id || activeTeacher?.uid || firebaseUser.uid, activeTeacher?.email || firebaseUser.email || undefined);
             refreshAllState(activeClass);
             const schoolProfile = StorageService.getSchoolProfile();
-            requestAndSaveFCMToken(firebaseUser.uid, schoolProfile.schoolCode).catch(() => {});
-            // Start listening to real-time changes across devices
+            requestAndSaveFCMToken(firebaseUser.uid, schoolProfile.schoolCode).catch(e => console.warn('FCM init note:', e));
             CloudSync.startRealtimeSync(firebaseUser, () => {
-              const teacher = StorageService.getAuthSession().currentTeacher;
-              const liveClass = StorageService.getActiveClassId(teacher?.id || teacher?.uid, teacher?.email);
+              const t = StorageService.getAuthSession().currentTeacher;
+              const liveClass = StorageService.getActiveClassId(t?.id || t?.uid, t?.email);
               refreshAllState(liveClass);
               showToast('Data synced in real-time with Google Account!', 'info');
             });
+          } else {
+            // If Firebase Auth has no active session, clear any stale pre-Auth local session
+            const currentSession = StorageService.getAuthSession();
+            if (currentSession.isLoggedIn) {
+              CloudSync.clearActiveSyncEmail();
+              StorageService.logout();
+              setIsAuthenticated(false);
+              setAuthRole('teacher');
+              setCurrentAdmin(null);
+            }
           }
         });
       } catch (authErr) {
@@ -302,25 +310,24 @@ export function App() {
     showToast(`Welcome, ${account.name}! Multi-device sync active.`, 'success');
   };
 
-  // School Admin Login Success Handler
-  const handleAdminLoginSuccess = async (admin: SchoolAdminAccount) => {
+  // School Admin Login Success Handler (Instant Portal Entry)
+  const handleAdminLoginSuccess = (admin: SchoolAdminAccount) => {
+    setCurrentAdmin(admin);
+    setAuthRole('admin');
+    setIsAuthenticated(true);
+
     if (admin.email) {
       CloudSync.setActiveSyncEmail(admin.email);
-      
-      // Force hard refresh on mobile for reliable sync
-      const platform = CloudSync.detectDevicePlatform();
-      if (platform !== 'Web Browser' && auth.currentUser) {
-        await CloudSync.forceFetchFromCloud(auth.currentUser);
+      if (auth?.currentUser) {
+        CloudSync.forceFetchFromCloud(auth.currentUser)
+          .then(() => refreshAllState())
+          .catch(() => {});
       }
-
       CloudSync.startRealtimeEmailSync(admin.email, () => {
         refreshAllState();
         showToast('Multi-device sync updated across devices.', 'info');
       });
     }
-    setCurrentAdmin(admin);
-    setAuthRole('admin');
-    setIsAuthenticated(true);
     const uid = admin.id || auth?.currentUser?.uid || 'admin';
     const schoolCode = admin.schoolCode || StorageService.getSchoolProfile().schoolCode;
     requestAndSaveFCMToken(uid, schoolCode).catch(() => {});
@@ -359,13 +366,19 @@ export function App() {
   };
 
   // School Admin Logout Handler
-  const handleAdminLogout = () => {
+  const handleAdminLogout = async () => {
     const currentUser = auth?.currentUser;
     const schoolProfile = StorageService.getSchoolProfile();
     if (currentUser) {
-      removeFCMToken(currentUser.uid, schoolProfile.schoolCode).catch(() => {});
+      removeFCMToken(currentUser.uid, schoolProfile.schoolCode).catch(e => console.warn('FCM cleanup note:', e));
     }
     logoutOneSignalUser().catch(() => {});
+    try {
+      await signOut(auth);
+      localStorage.removeItem('hss_auth_session_v1');
+    } catch (e) {
+      console.warn('Firebase admin signout error:', e);
+    }
     CloudSync.clearActiveSyncEmail();
     StorageService.logout();
     setIsAuthenticated(false);
@@ -411,7 +424,24 @@ export function App() {
       createdAt: existingCls?.createdAt || new Date().toISOString()
     };
 
-    CloudSync.saveClassToSchool(schoolCode, updatedClassItem, students).catch(() => {});
+    CloudSync.saveSchoolProfileToSchool(schoolCode, newSchool).catch(err =>
+      console.warn('Firestore school profile sync error:', err)
+    );
+    CloudSync.saveClassToSchool(schoolCode, updatedClassItem, students).catch(err => {
+      console.error('Firestore class profile sync error:', err);
+      showToast('Cloud sync warning: Check connection while saving class profile.', 'warning');
+    });
+    if (currentTeacher) {
+      CloudSync.saveTeacherToSchool(schoolCode, {
+        ...currentTeacher,
+        name: newTeacher.teacherName || currentTeacher.name,
+        phone: newTeacher.phone ?? currentTeacher.phone,
+        designation: newTeacher.designation || currentTeacher.designation,
+        photoUrl: newTeacher.photoUrl ?? currentTeacher.photoUrl,
+        dob: newTeacher.dob ?? currentTeacher.dob,
+        academicYear: newTeacher.academicYear ?? currentTeacher.academicYear
+      }).catch(err => console.warn('Firestore teacher profile sync error:', err));
+    }
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
       teacherName: currentTeacher?.name || newTeacher.teacherName || 'Teacher',
@@ -420,6 +450,7 @@ export function App() {
       activityType: 'profile_updated',
       description: `Updated Class "${newClass.className}" details (${newClass.standard} ${newClass.stream} ${newClass.section}).`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast('School & Class Profile updated successfully!', 'success');
   };
@@ -446,7 +477,14 @@ export function App() {
         classStrength: updated.length,
         schoolCode
       };
-      CloudSync.saveClassToSchool(schoolCode, updatedCls, updated).catch(() => {});
+      CloudSync.saveClassToSchool(schoolCode, updatedCls, updated).catch(err => {
+        console.error('Firestore student class sync error:', err);
+        showToast('Cloud sync warning: Could not sync new student to Firestore.', 'warning');
+      });
+    } else {
+      CloudSync.saveStudentToSchool(schoolCode, { ...newStudent, classId: activeClassId }).catch(err => {
+        console.error('Firestore saveStudentToSchool error:', err);
+      });
     }
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
@@ -456,6 +494,7 @@ export function App() {
       activityType: 'student_added',
       description: `Enrolled student "${newStudent.name}" (Roll #${newStudent.rollNo}) in class.`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast(`Student "${newStudent.name}" enrolled!`, 'success');
     return true;
@@ -483,7 +522,14 @@ export function App() {
         classStrength: updated.length,
         schoolCode
       };
-      CloudSync.saveClassToSchool(schoolCode, updatedCls, updated).catch(() => {});
+      CloudSync.saveClassToSchool(schoolCode, updatedCls, updated).catch(err => {
+        console.error('Firestore update student error:', err);
+        showToast('Cloud sync warning: Could not update student in Firestore.', 'warning');
+      });
+    } else {
+      CloudSync.saveStudentToSchool(schoolCode, { ...updatedStudent, classId: activeClassId }).catch(err => {
+        console.error('Firestore update student note:', err);
+      });
     }
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
@@ -493,6 +539,7 @@ export function App() {
       activityType: 'profile_updated',
       description: `Updated details for student "${updatedStudent.name}" (Roll #${updatedStudent.rollNo}).`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast(`Student "${updatedStudent.name}" updated!`, 'success');
     return true;
@@ -510,6 +557,9 @@ export function App() {
     const schoolCode = currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
     const classes = StorageService.getClassesList();
     const existingCls = classes.find(c => c.id === activeClassId);
+    CloudSync.deleteStudentFromSchool(schoolCode, studentId, activeClassId).catch(err => {
+      console.error('Firestore deleteStudentFromSchool error:', err);
+    });
     if (existingCls) {
       const updatedCls: ClassItem = {
         ...existingCls,
@@ -526,6 +576,7 @@ export function App() {
       activityType: 'profile_updated',
       description: `Removed student record "${target?.name || ''}".`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast(`Removed student ${target?.name || ''}`, 'info');
   };
@@ -541,6 +592,11 @@ export function App() {
     const schoolCode = currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
     const classes = StorageService.getClassesList();
     const existingCls = classes.find(c => c.id === activeClassId);
+    ids.forEach(sid => {
+      CloudSync.deleteStudentFromSchool(schoolCode, sid, activeClassId).catch(err =>
+        console.warn('Firestore bulk delete student note:', err)
+      );
+    });
     if (existingCls) {
       const updatedCls: ClassItem = {
         ...existingCls,
@@ -557,6 +613,7 @@ export function App() {
       activityType: 'profile_updated',
       description: `Deleted ${ids.length} student records from class.`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast(`Deleted ${ids.length} students.`, 'info');
   };
@@ -587,7 +644,10 @@ export function App() {
         classStrength: finalStudents.length,
         schoolCode
       };
-      CloudSync.saveClassToSchool(schoolCode, updatedCls, finalStudents).catch(() => {});
+      CloudSync.saveClassToSchool(schoolCode, updatedCls, finalStudents).catch(err => {
+        console.error('Firestore import students error:', err);
+        showToast('Cloud sync warning: Imported locally, check Firestore sync.', 'warning');
+      });
     }
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
@@ -597,6 +657,7 @@ export function App() {
       activityType: 'student_added',
       description: `Imported ${fullList.length} students into class roster.`
     }).catch(() => {});
+    CloudSync.scheduleAutoSync(true);
 
     showToast(`Successfully imported ${fullList.length} students!`, 'success');
   };
@@ -719,11 +780,16 @@ export function App() {
   const handleSaveAttendance = (record: AttendanceRecord) => {
     StorageService.saveDailyAttendance(record, activeClassId);
     setAttendance(StorageService.getAttendance(activeClassId));
-    CloudSync.scheduleAutoSync(true);
 
     const session = StorageService.getAuthSession();
     const currentTeacher = session.currentTeacher;
     const schoolCode = currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.saveAttendanceToSchool(schoolCode, activeClassId, record).catch(err => {
+      console.error('Firestore saveAttendanceToSchool error:', err);
+      showToast('Cloud sync warning: Could not sync attendance to Firestore.', 'warning');
+    });
+    CloudSync.scheduleAutoSync(true);
+
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
       teacherName: currentTeacher?.name || 'Teacher',
@@ -740,6 +806,12 @@ export function App() {
     const updated = attendance.filter(a => a.id !== recordId);
     StorageService.saveAttendance(updated, activeClassId);
     setAttendance(updated);
+
+    const session = StorageService.getAuthSession();
+    const schoolCode = session.currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.deleteAttendanceFromSchool(schoolCode, activeClassId, recordId).catch(err => {
+      console.error('Firestore deleteAttendanceFromSchool error:', err);
+    });
     CloudSync.scheduleAutoSync(true);
     showToast('Attendance record deleted.', 'info');
   };
@@ -756,11 +828,16 @@ export function App() {
     }
     StorageService.saveExams(updated, activeClassId);
     setExams(updated);
-    CloudSync.scheduleAutoSync(true);
 
     const session = StorageService.getAuthSession();
     const currentTeacher = session.currentTeacher;
     const schoolCode = currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.saveExamToSchool(schoolCode, activeClassId, exam).catch(err => {
+      console.error('Firestore saveExamToSchool error:', err);
+      showToast('Cloud sync warning: Could not sync exam to Firestore.', 'warning');
+    });
+    CloudSync.scheduleAutoSync(true);
+
     const totalMaxMarks = exam.subjects?.reduce((sum, s) => sum + (s.maxMarks || 0), 0) || 0;
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
@@ -771,7 +848,6 @@ export function App() {
       description: `Saved examination schedule/details for "${exam.name}" (Max: ${totalMaxMarks}).`
     }).catch(() => {});
 
-    // Dispatch real-time exam notification via FCM
     sendSchoolNotification({
       schoolCode,
       title: `📝 Exam Schedule: ${exam.name}`,
@@ -787,6 +863,12 @@ export function App() {
     const updated = exams.filter(e => e.id !== examId);
     StorageService.saveExams(updated, activeClassId);
     setExams(updated);
+
+    const session = StorageService.getAuthSession();
+    const schoolCode = session.currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.deleteExamFromSchool(schoolCode, activeClassId, examId).catch(err => {
+      console.error('Firestore deleteExamFromSchool error:', err);
+    });
     CloudSync.scheduleAutoSync(true);
     showToast('Exam deleted.', 'info');
   };
@@ -794,11 +876,16 @@ export function App() {
   const handleSaveMarksRecord = (examId: string, marksRecord: ExamMarksRecord) => {
     StorageService.saveExamMarks(examId, marksRecord, activeClassId);
     setExamMarksMap(StorageService.getExamMarksMap(activeClassId));
-    CloudSync.scheduleAutoSync(true);
 
     const session = StorageService.getAuthSession();
     const currentTeacher = session.currentTeacher;
     const schoolCode = currentTeacher?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.saveExamMarksToSchool(schoolCode, activeClassId, { ...marksRecord, examId: marksRecord.examId || examId }).catch(err => {
+      console.error('Firestore saveExamMarksToSchool error:', err);
+      showToast('Cloud sync warning: Could not sync exam marks to Firestore.', 'warning');
+    });
+    CloudSync.scheduleAutoSync(true);
+
     const targetExam = exams.find(e => e.id === examId);
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: currentTeacher?.id || 'teacher',
@@ -816,6 +903,13 @@ export function App() {
   const handleSaveReminders = (newReminders: Reminder[]) => {
     StorageService.saveReminders(newReminders);
     setReminders(newReminders);
+
+    const session = StorageService.getAuthSession();
+    const schoolCode = session.currentTeacher?.schoolCode || session.currentAdmin?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    CloudSync.saveRemindersToSchool(schoolCode, newReminders).catch(err => {
+      console.error('Firestore saveRemindersToSchool error:', err);
+    });
+    CloudSync.scheduleAutoSync(true);
   };
 
   // 7. Reset & Wipe Handlers

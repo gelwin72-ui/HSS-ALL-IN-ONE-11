@@ -191,6 +191,12 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     const nextVal = !includeSaturday;
     setIncludeSaturday(nextVal);
     StorageService.setSaturdayIncluded(nextVal, schoolCode, activeTeacherId);
+    if (schoolCode) {
+      CloudSync.saveTimetablePrefsToSchool(schoolCode, {
+        includeSaturday: nextVal,
+        periodTimings
+      }).catch(err => console.warn('Firestore timetable prefs sync error:', err));
+    }
     if (!nextVal && selectedDay === 'Saturday') {
       setSelectedDay('ALL');
     }
@@ -241,10 +247,19 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     const updatedSlots = StorageService.getTimetables(schoolCode);
     setTimetables(updatedSlots);
 
-    if (schoolCode && activeTeacherId) {
-      const myUpdatedSlots = updatedSlots.filter(s => s.teacherId === activeTeacherId);
-      for (const s of myUpdatedSlots) {
-        CloudSync.saveTimetableSlotToSchool(schoolCode, s).catch(() => {});
+    if (schoolCode) {
+      await CloudSync.saveTimetablePrefsToSchool(schoolCode, {
+        includeSaturday,
+        periodTimings: draftTimings
+      }).catch(err => console.warn('Firestore saveTimetablePrefsToSchool error:', err));
+
+      if (activeTeacherId) {
+        const myUpdatedSlots = updatedSlots.filter(s => s.teacherId === activeTeacherId);
+        if (myUpdatedSlots.length > 0) {
+          await CloudSync.saveTimetablesToSchool(schoolCode, myUpdatedSlots).catch(err =>
+            console.warn('Firestore saveTimetablesToSchool error:', err)
+          );
+        }
       }
     }
 
@@ -459,7 +474,9 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
 
     StorageService.saveTimetableSlot(slotPayload);
     if (schoolCode) {
-      CloudSync.saveTimetableSlotToSchool(schoolCode, slotPayload).catch(() => {});
+      CloudSync.saveTimetableSlotToSchool(schoolCode, slotPayload).catch(err =>
+        console.warn('Firestore saveTimetableSlotToSchool error:', err)
+      );
     }
     refreshTimetables();
     setIsModalOpen(false);
@@ -469,7 +486,9 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
   const handleDeleteSlot = (slotId: string) => {
     StorageService.deleteTimetableSlot(slotId);
     if (schoolCode) {
-      CloudSync.deleteTimetableSlotFromSchool(schoolCode, slotId).catch(() => {});
+      CloudSync.deleteTimetableSlotFromSchool(schoolCode, slotId).catch(err =>
+        console.warn('Firestore deleteTimetableSlotFromSchool error:', err)
+      );
     }
     refreshTimetables();
     setIsModalOpen(false);
@@ -492,10 +511,10 @@ export const TimetableScreen: React.FC<TimetableScreenProps> = ({
     };
 
     const generated = StorageService.generateTeacherStandardTimetable(sampleTeacher, classInfo.className);
-    if (schoolCode) {
-      generated.forEach(s => {
-        CloudSync.saveTimetableSlotToSchool(schoolCode, s).catch(() => {});
-      });
+    if (schoolCode && generated.length > 0) {
+      CloudSync.saveTimetablesToSchool(schoolCode, generated).catch(err =>
+        console.warn('Firestore auto-generate timetable sync error:', err)
+      );
     }
     refreshTimetables();
     showToast('Weekly timetable template automatically generated and saved!');

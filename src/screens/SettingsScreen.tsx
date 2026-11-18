@@ -54,7 +54,7 @@ import {
 import { StorageService } from '../utils/storage';
 import { exportStudentsToCSV, exportAttendanceToCSV } from '../utils/csvHelper';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { auth, googleProvider, signInWithPopup, signOut } from '../utils/firebase';
+import { auth, googleProvider, signInWithPopup, signOut, firebaseConfig, uploadFileToFirebaseStorage } from '../utils/firebase';
 import { CloudSync, SyncStatus } from '../utils/cloudSync';
 import {
   getNotificationPreferences,
@@ -340,7 +340,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  // Backup Export
+  // Backup Export (Downloads locally + archives to Firebase Cloud Storage)
   const handleExportBackup = () => {
     try {
       const backupJson = StorageService.exportAllDataAsJSON();
@@ -348,14 +348,25 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       const dateStr = new Date().toISOString().split('T')[0];
+      const fileName = `HSS_ALL_IN_ONE_Backup_${dateStr}.json`;
       link.href = url;
-      link.download = `HSS_ALL_IN_ONE_Backup_${dateStr}.json`;
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      setSuccessMsg('Complete database backup JSON exported successfully!');
+      if (auth?.currentUser) {
+        uploadFileToFirebaseStorage({
+          file: blob,
+          fileName,
+          category: 'backups',
+          schoolCode: school?.schoolCode || 'SSHSS@111213',
+          description: `Teacher classroom JSON backup (${dateStr})`
+        }).catch(err => console.warn('Cloud Storage backup archive note:', err));
+      }
+
+      setSuccessMsg('Complete database backup JSON exported and archived successfully!');
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (err: any) {
       setErrorMsg(`Failed to export backup: ${err.message}`);
@@ -363,19 +374,31 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     }
   };
 
-  // Restore Backup
+  // Restore Backup (Restores locally + pushes to Firestore + archives to Cloud Storage)
   const handleRestoreFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = event => {
+    reader.onload = async event => {
       try {
         const text = event.target?.result as string;
         const success = StorageService.importBackupJSON(text);
         if (success) {
           onDataRestored();
-          setSuccessMsg('Database restored successfully from backup!');
+          if (auth?.currentUser) {
+            CloudSync.pushToCloud(auth.currentUser).catch(err =>
+              console.warn('Firestore backup restore push note:', err)
+            );
+            uploadFileToFirebaseStorage({
+              file,
+              fileName: file.name || `restored-backup-${Date.now()}.json`,
+              category: 'backups',
+              schoolCode: school?.schoolCode || 'SSHSS@111213',
+              description: 'Restored JSON backup file'
+            }).catch(err => console.warn('Cloud Storage backup restore archive note:', err));
+          }
+          setSuccessMsg('Database restored successfully and synced to Firebase Cloud!');
           setTimeout(() => setSuccessMsg(null), 3000);
         } else {
           setErrorMsg('Invalid backup file format. Please use a valid HSS JSON backup.');
@@ -740,8 +763,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                Project: <span className="font-mono text-slate-300 font-bold">hss-all-in-one</span> | 
-                Sender ID: <span className="font-mono text-slate-300 font-bold">978993384932</span>
+                Project: <span className="font-mono text-slate-300 font-bold">{firebaseConfig.projectId}</span> |{' '}
+                Sender ID: <span className="font-mono text-slate-300 font-bold">{firebaseConfig.messagingSenderId}</span>
               </p>
             </div>
           </div>

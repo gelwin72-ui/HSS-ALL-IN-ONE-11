@@ -9,7 +9,8 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updateProfile,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  sendEmailVerification
 } from 'firebase/auth';
 import {
   getDatabase,
@@ -45,31 +46,40 @@ import {
   orderBy as fsOrderBy,
   serverTimestamp as fsServerTimestamp,
   getDocFromServer as fsGetDocFromServer,
-  Firestore,
-  DocumentReference,
-  CollectionReference,
-  Query
+  writeBatch as fsWriteBatch,
+  Firestore
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytes,
+  uploadString,
+  getDownloadURL,
+  deleteObject,
+  FirebaseStorage
+} from 'firebase/storage';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
-// Load configuration from firebase-applet-config.json with environment variable overrides
+// Load authoritative configuration from firebase-applet-config.json with env fallback
 const env = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : {};
+const resolvedProjectId = firebaseConfigJson?.projectId || env.VITE_FIREBASE_PROJECT_ID || 'hss-all-in-one-1';
+const envDbUrl = env.VITE_FIREBASE_DATABASE_URL || '';
 
 export const firebaseConfig = {
-  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfigJson?.projectId || 'hssallinone2026',
-  appId: env.VITE_FIREBASE_APP_ID || firebaseConfigJson?.appId || '',
-  apiKey: env.VITE_FIREBASE_API_KEY || firebaseConfigJson?.apiKey || '',
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson?.authDomain || `${firebaseConfigJson?.projectId || 'hssallinone2026'}.firebaseapp.com`,
-  databaseURL: env.VITE_FIREBASE_DATABASE_URL || (firebaseConfigJson as any)?.databaseURL || '',
-  firestoreDatabaseId: env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || (firebaseConfigJson as any)?.firestoreDatabaseId || 'ai-studio-remixhssallinone-55b89812-ee43-4bd9-aa89-b18c6fc3861d',
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigJson?.storageBucket || `${firebaseConfigJson?.projectId || 'hssallinone2026'}.firebasestorage.app`,
-  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfigJson?.messagingSenderId || '',
-  measurementId: env.VITE_FIREBASE_MEASUREMENT_ID || firebaseConfigJson?.measurementId || '',
-  oAuthClientId: env.VITE_FIREBASE_OAUTH_CLIENT_ID || firebaseConfigJson?.oAuthClientId || '',
-  recaptchaSiteKey: env.VITE_FIREBASE_RECAPTCHA_SITE_KEY || firebaseConfigJson?.recaptchaSiteKey || ''
+  projectId: resolvedProjectId,
+  appId: firebaseConfigJson?.appId || env.VITE_FIREBASE_APP_ID || '1:679893158194:web:5f7cf7e5a953c05330af2b',
+  apiKey: firebaseConfigJson?.apiKey || env.VITE_FIREBASE_API_KEY || 'AIzaSyDyI4ZU-UgnoqYr_nicbTIAR5-gDY8aBTw',
+  authDomain: firebaseConfigJson?.authDomain || env.VITE_FIREBASE_AUTH_DOMAIN || `${resolvedProjectId}.firebaseapp.com`,
+  databaseURL: (firebaseConfigJson as any)?.databaseURL || (envDbUrl.includes(resolvedProjectId) ? envDbUrl : `https://${resolvedProjectId}-default-rtdb.firebaseio.com`),
+  firestoreDatabaseId: (firebaseConfigJson as any)?.firestoreDatabaseId || env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '(default)',
+  storageBucket: firebaseConfigJson?.storageBucket || env.VITE_FIREBASE_STORAGE_BUCKET || `${resolvedProjectId}.firebasestorage.app`,
+  messagingSenderId: firebaseConfigJson?.messagingSenderId || env.VITE_FIREBASE_MESSAGING_SENDER_ID || '679893158194',
+  measurementId: firebaseConfigJson?.measurementId || env.VITE_FIREBASE_MEASUREMENT_ID || 'G-20S3SECRGG',
+  oAuthClientId: firebaseConfigJson?.oAuthClientId || env.VITE_FIREBASE_OAUTH_CLIENT_ID || '',
+  recaptchaSiteKey: firebaseConfigJson?.recaptchaSiteKey || env.VITE_FIREBASE_RECAPTCHA_SITE_KEY || ''
 };
 
-// Safe Firebase App Initialization
+// Safe Single Firebase App Initialization
 let appInstance: any = null;
 try {
   if (!getApps().length) {
@@ -108,7 +118,7 @@ export const loginWithGoogle = async () => {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error) {
-    console.error("Error signing in with Google:", error);
+    console.error('Error signing in with Google:', error);
     throw error;
   }
 };
@@ -124,27 +134,44 @@ try {
 }
 export const database: Database = rtdbInstance;
 
-// Safe Firestore Initialization - Bound directly to user's Firestore Database ID
-const firestoreDbId = firebaseConfig.firestoreDatabaseId || 'ai-studio-remixhssallinone-55b89812-ee43-4bd9-aa89-b18c6fc3861d';
+// Safe Firestore Initialization - Uses configured named DB or default database
+const firestoreDbId = firebaseConfig.firestoreDatabaseId || '(default)';
+const useNamedDb = Boolean(firestoreDbId && firestoreDbId !== '(default)');
 let firestoreInstance: any = null;
 try {
-  setLogLevel('silent');
-} catch {}
+  setLogLevel('error');
+} catch {
+  // ignore log level config errors
+}
 
 try {
-  firestoreInstance = getFirestore(app, firestoreDbId);
-} catch (err) {
+  firestoreInstance = useNamedDb
+    ? getFirestore(app, firestoreDbId)
+    : getFirestore(app);
+} catch {
   try {
-    firestoreInstance = initializeFirestore(app, {
+    const settings = {
       experimentalAutoDetectLongPolling: true,
       ignoreUndefinedProperties: true
-    }, firestoreDbId);
+    };
+    firestoreInstance = useNamedDb
+      ? initializeFirestore(app, settings, firestoreDbId)
+      : initializeFirestore(app, settings);
   } catch (e) {
     console.warn('[Firebase Firestore] Initialization warning:', e);
   }
 }
 export const firestore: Firestore = firestoreInstance;
 export const db: Firestore = firestoreInstance;
+
+// Safe Cloud Storage Initialization
+let storageInstance: FirebaseStorage | null = null;
+try {
+  storageInstance = getStorage(app);
+} catch (err) {
+  console.warn('[Firebase Storage] Initialization warning:', err);
+}
+export const storage: FirebaseStorage | null = storageInstance;
 
 // Direct Firestore Native Exports
 export {
@@ -161,30 +188,35 @@ export {
   fsOnSnapshot,
   fsOrderBy,
   fsServerTimestamp,
-  fsGetDocFromServer
+  fsGetDocFromServer,
+  fsWriteBatch,
+  rtdbQuery
 };
 
 export async function testFirestoreConnection(): Promise<{ connected: boolean; error?: string }> {
   if (!firestore) return { connected: false, error: 'Firestore not initialized' };
   try {
-    const testDoc = fsDoc(firestore, 'test', 'connection');
-    await fsGetDocFromServer(testDoc).catch(() => null);
+    await fsGetDocFromServer(fsDoc(firestore, 'test', 'connection'));
     return { connected: true };
   } catch (error: any) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firestore client appears offline:', error.message);
-      return { connected: false, error: 'Client is offline' };
+      console.error('Please check your Firebase configuration. Firestore client is offline.');
+      return { connected: false, error: error.message };
     }
-    return { connected: true }; // connected to Firestore endpoint even if test doc doesn't exist
+    return { connected: true };
   }
 }
 
-// Test initial connection safely
-if (firestore) {
-  testFirestoreConnection().catch(() => {});
+export async function testConnection(): Promise<void> {
+  await testFirestoreConnection();
 }
 
-// Dual-Mode Firestore / Realtime DB wrappers
+// Run startup connectivity probe in browser
+if (typeof window !== 'undefined' && firestore) {
+  testConnection().catch(() => {});
+}
+
+// Dual-Mode Firestore wrappers (for legacy callers importing { doc, getDoc, ... } from firebase.ts)
 export function doc(dbRefOrTarget: any, ...pathSegments: string[]) {
   if (dbRefOrTarget === firestore || dbRefOrTarget === db || (!dbRefOrTarget && firestore)) {
     const fullPath = pathSegments.filter(Boolean).join('/');
@@ -205,45 +237,33 @@ export async function getDoc(targetRef: any) {
   if (!targetRef) {
     return { exists: () => false, data: () => null };
   }
-  // If this is a Firestore DocumentReference
   if (targetRef && typeof targetRef.path === 'string' && firestore) {
-    try {
-      const snap = await fsGetDoc(targetRef);
-      return {
-        exists: () => snap.exists(),
-        data: () => snap.data()
-      };
-    } catch (e) {
-      console.warn('Firestore getDoc error:', e);
-    }
+    const snap = await fsGetDoc(targetRef);
+    return {
+      exists: () => snap.exists(),
+      data: () => snap.data()
+    };
   }
-  // Otherwise try RTDB DataSnapshot
   if (database) {
-    try {
-      const snapshot: DataSnapshot = await get(targetRef);
-      return {
-        exists: () => snapshot.exists(),
-        data: () => snapshot.val()
-      };
-    } catch (e) {
-      console.warn('RTDB getDoc error:', e);
-    }
+    const snapshot: DataSnapshot = await get(targetRef);
+    return {
+      exists: () => snapshot.exists(),
+      data: () => snapshot.val()
+    };
   }
   return { exists: () => false, data: () => null };
 }
 
 export async function setDoc(targetRef: any, data: any, options?: { merge?: boolean }) {
   if (!targetRef) return;
-  // If this is a Firestore DocumentReference
   if (targetRef && typeof targetRef.path === 'string' && firestore) {
     return await fsSetDoc(targetRef, data, options || {});
   }
   if (database) {
     if (options?.merge) {
       return await update(targetRef, data);
-    } else {
-      return await set(targetRef, data);
     }
+    return await set(targetRef, data);
   }
 }
 
@@ -277,11 +297,7 @@ export function collection(dbTarget: any, ...pathSegments: string[]) {
 
 export function query(collectionRef: any, ...queryConstraints: any[]) {
   if (firestore && collectionRef) {
-    try {
-      return fsQuery(collectionRef, ...queryConstraints);
-    } catch {
-      return collectionRef;
-    }
+    return fsQuery(collectionRef, ...queryConstraints);
   }
   return collectionRef;
 }
@@ -292,12 +308,7 @@ export function where(fieldPath: string, opStr: any, value: any) {
 
 export async function getDocs(queryRef: any) {
   if (firestore && queryRef) {
-    try {
-      const snap = await fsGetDocs(queryRef);
-      return snap;
-    } catch (err) {
-      console.warn('Firestore getDocs warning:', err);
-    }
+    return await fsGetDocs(queryRef);
   }
   return { exists: () => false, forEach: () => {}, docs: [], empty: true, size: 0 };
 }
@@ -306,7 +317,7 @@ export async function addDoc(collectionRef: any, data: any) {
   if (firestore && collectionRef) {
     return await fsAddDoc(collectionRef, data);
   }
-  return { id: `doc-${Date.now()}` };
+  throw new Error('Firestore is not initialized');
 }
 
 export function onSnapshot(targetRef: any, onNext: (snap: any) => void, onError?: (err: any) => void) {
@@ -325,60 +336,234 @@ export enum OperationType {
   WRITE = 'write',
 }
 
-export interface DatabaseErrorInfo {
+export interface FirestoreErrorInfo {
   error: string;
   operationType: OperationType;
   path: string | null;
   authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: Array<{
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }>;
   };
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: DatabaseErrorInfo = {
+export type DatabaseErrorInfo = FirestoreErrorInfo;
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth?.currentUser?.uid,
       email: auth?.currentUser?.email,
       emailVerified: auth?.currentUser?.emailVerified,
+      isAnonymous: auth?.currentUser?.isAnonymous,
+      tenantId: auth?.currentUser?.tenantId,
+      providerInfo: (auth?.currentUser?.providerData || []).map((provider: any) => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      }))
     },
     operationType,
     path
   };
-  console.error('Firebase PERMISSION_DENIED or other error: ', JSON.stringify(errInfo));
-  // Keep the throw to allow the application to handle the error, but log it clearly first.
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
 
+export interface CloudFileUploadParams {
+  file: Blob | File | string;
+  fileName: string;
+  category: 'students' | 'teachers' | 'backups' | 'users' | string;
+  schoolCode: string;
+  entityId?: string;
+  contentType?: string;
+  uploadedBy?: string;
+  description?: string;
+}
+
+export interface CloudFileRecord {
+  id: string;
+  ownerUid: string;
+  fileName: string;
+  fileType: string;
+  contentType: string;
+  category: string;
+  entityId: string;
+  storagePath: string;
+  downloadUrl: string;
+  size: number;
+  email: string;
+  schoolCode: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  description: string;
+}
+
 /**
- * Saves entered Gmail addresses and passwords in Firebase Realtime Database & Firestore under 'gmail/${safeKey}'.
+ * Uploads an image, PDF, CSV, or JSON backup to Firebase Cloud Storage (hss-all-in-one-1.firebasestorage.app)
+ * and registers file metadata inside Firestore `cloud_files/{fileId}`.
  */
-export const storeCredentialsInRTDB = async (gmail: string, password?: string): Promise<void> => {
+export async function uploadFileToFirebaseStorage(params: CloudFileUploadParams): Promise<CloudFileRecord> {
+  const currentUser = auth?.currentUser;
+  if (!currentUser) {
+    throw new Error('Authentication required before uploading files to Cloud Storage.');
+  }
+  if (!storage) {
+    throw new Error('Firebase Cloud Storage is not initialized.');
+  }
+
+  const cleanSchoolCode = (params.schoolCode || 'SSHSS@111213')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_\-.@]/g, '_');
+  const safeFileName = (params.fileName || `file_${Date.now()}`).replace(/[^a-zA-Z0-9._\-]/g, '_');
+  const fileId = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const folder = params.category || 'backups';
+  const storagePath =
+    folder === 'users'
+      ? `users/${currentUser.uid}/${fileId}_${safeFileName}`
+      : `schools/${cleanSchoolCode}/${folder}/${fileId}_${safeFileName}`;
+
+  const sRef = storageRef(storage, storagePath);
+  let detectedContentType = params.contentType || 'application/octet-stream';
+  let fileSize = 0;
+
+  if (typeof params.file === 'string') {
+    if (params.file.startsWith('data:')) {
+      const mimeMatch = params.file.match(/^data:([^;]+);/);
+      if (mimeMatch?.[1]) {
+        detectedContentType = mimeMatch[1];
+      }
+      const snapshot = await uploadString(sRef, params.file, 'data_url', {
+        contentType: detectedContentType
+      });
+      fileSize = snapshot.metadata?.size || params.file.length;
+    } else {
+      const textBlob = new Blob([params.file], { type: detectedContentType });
+      const snapshot = await uploadBytes(sRef, textBlob, { contentType: detectedContentType });
+      fileSize = snapshot.metadata?.size || textBlob.size;
+    }
+  } else {
+    detectedContentType = params.contentType || params.file.type || detectedContentType;
+    const snapshot = await uploadBytes(sRef, params.file, { contentType: detectedContentType });
+    fileSize = snapshot.metadata?.size || params.file.size;
+  }
+
+  const downloadUrl = await getDownloadURL(sRef);
+  const now = new Date().toISOString();
+
+  const record: CloudFileRecord = {
+    id: fileId,
+    ownerUid: currentUser.uid,
+    fileName: safeFileName.slice(0, 255),
+    fileType: detectedContentType.slice(0, 100),
+    contentType: detectedContentType.slice(0, 100),
+    category: String(folder).slice(0, 64),
+    entityId: String(params.entityId || currentUser.uid).slice(0, 128),
+    storagePath: storagePath.slice(0, 500),
+    downloadUrl: downloadUrl.slice(0, 1500),
+    size: Number(fileSize) || 0,
+    email: (currentUser.email || '').toLowerCase(),
+    schoolCode: cleanSchoolCode,
+    uploadedBy: (params.uploadedBy || currentUser.displayName || currentUser.email || 'Teacher').slice(0, 150),
+    uploadedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    description: (params.description || `${folder} upload`).slice(0, 500)
+  };
+
+  if (firestore) {
+    try {
+      await fsSetDoc(fsDoc(firestore, 'cloud_files', fileId), record);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `cloud_files/${fileId}`);
+    }
+  }
+
+  return record;
+}
+
+export async function deleteCloudStorageFile(storagePath: string, fileId?: string): Promise<void> {
+  if (storage && storagePath) {
+    try {
+      await deleteObject(storageRef(storage, storagePath));
+    } catch (err) {
+      console.warn('[Firebase Storage] deleteObject warning:', err);
+    }
+  }
+  if (firestore && fileId) {
+    try {
+      await fsDeleteDoc(fsDoc(firestore, 'cloud_files', fileId));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `cloud_files/${fileId}`);
+    }
+  }
+}
+
+/**
+ * Saves entered Gmail, DOB, UID, and schoolCode in Firestore (`gmail/${safeKey}` and `teacher_credentials/${safeKey}`)
+ * strictly WITHOUT storing plaintext passwords (all passwords reside securely in Firebase Auth).
+ */
+export const storeCredentialsInRTDB = async (
+  gmail: string,
+  _password?: string,
+  dob?: string,
+  schoolCode?: string,
+  name?: string,
+  uid?: string
+): Promise<void> => {
   if (!gmail) return;
-  try {
-    const cleanEmail = gmail.trim().toLowerCase();
-    if (!cleanEmail.includes('@')) return;
-    const safeKey = cleanEmail.replace(/[.#$[\]/]/g, '_');
-    const now = new Date().toISOString();
-    const payload: Record<string, any> = {
-      gmail: cleanEmail,
-      email: cleanEmail,
-      lastEntryAt: now,
-      updatedAt: now
-    };
-    if (password !== undefined && password !== '') {
-      payload.password = password;
+  const currentUser = auth?.currentUser;
+  const resolvedUid = uid || currentUser?.uid;
+  if (!resolvedUid) return;
+
+  const cleanEmail = gmail.trim().toLowerCase();
+  if (!cleanEmail.includes('@')) return;
+  const safeKey = cleanEmail.replace(/[.#$[\]/]/g, '_');
+  const now = new Date().toISOString();
+  const payload: Record<string, any> = {
+    uid: resolvedUid,
+    gmail: cleanEmail,
+    email: cleanEmail,
+    schoolCode: (schoolCode || 'SSHSS@111213').trim().toUpperCase(),
+    role: 'teacher',
+    lastEntryAt: now,
+    updatedAt: now
+  };
+  if (dob !== undefined && dob !== '') {
+    payload.dob = dob;
+    payload.dateOfBirth = dob;
+  }
+  if (name) {
+    payload.name = name.trim();
+  }
+
+  if (database) {
+    try {
+      await update(ref(database, `gmail/${safeKey}`), payload);
+    } catch (e) {
+      console.warn('RTDB gmail directory sync note:', e);
     }
-    if (database) {
-      await update(ref(database, `gmail/${safeKey}`), payload).catch(() => {});
+  }
+  if (firestore) {
+    try {
+      await fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true });
+      await fsSetDoc(fsDoc(firestore, 'teacher_credentials', safeKey), payload, { merge: true });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.WRITE, `gmail/${safeKey}`);
     }
-    if (firestore) {
-      await fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true }).catch(() => {});
-    }
-  } catch (e) {
-    console.warn('storeCredentialsInRTDB note:', e);
   }
 };
 
@@ -391,6 +576,7 @@ export {
   createUserWithEmailAndPassword,
   updateProfile,
   sendPasswordResetEmail,
+  sendEmailVerification,
   ref,
   get,
   set,

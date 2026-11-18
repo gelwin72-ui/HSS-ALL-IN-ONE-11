@@ -21,13 +21,13 @@ self.addEventListener('activate', (event) => {
 
 // Initialize Firebase compat app for service worker
 firebase.initializeApp({
-  apiKey: "AIzaSyCs2H0N2c4kz9RvNOBlfTplxLGYMfnY6IU",
-  authDomain: "hss-all-in-one.firebaseapp.com",
-  databaseURL: "https://hss-all-in-one-default-rtdb.firebaseio.com",
-  projectId: "hss-all-in-one",
-  storageBucket: "hss-all-in-one.firebasestorage.app",
-  messagingSenderId: "978993384932",
-  appId: "1:978993384932:web:8d841a6bb5e840f1910bf1"
+  apiKey: "AIzaSyDyI4ZU-UgnoqYr_nicbTIAR5-gDY8aBTw",
+  authDomain: "hss-all-in-one-1.firebaseapp.com",
+  databaseURL: "https://hss-all-in-one-1-default-rtdb.firebaseio.com",
+  projectId: "hss-all-in-one-1",
+  storageBucket: "hss-all-in-one-1.firebasestorage.app",
+  messagingSenderId: "679893158194",
+  appId: "1:679893158194:web:5f7cf7e5a953c05330af2b"
 });
 
 const messaging = firebase.messaging();

@@ -1905,7 +1905,6 @@ export const StorageService = {
       id: `admin-${qEmail.replace(/[^a-zA-Z0-9]/g, '_')}`,
       schoolName: schoolName.trim() || "St. Sebastian's Higher Secondary School Koodaranhi",
       schoolCode: 'SSHSS@111213',
-      adminPassword: pin,
       adminName: adminNameDetermined,
       designation: 'Principal & School Administrator',
       email: qEmail,

@@ -1,195 +1,566 @@
 {
   "entities": {
-    "files": {
-      "title": "Cloud Saved Files & Backups",
-      "description": "JSON database backups, CSV exports, student documents, and app snapshots saved to Firestore",
+    "users": {
+      "title": "User Account & Role Profile",
+      "description": "Authenticated user profile with RBAC, schoolCode tenancy, and active state keyed by Firebase Auth UID (no plaintext passwords stored)",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "fileName": { "type": "string" },
-        "fileType": { "type": "string" },
-        "mimeType": { "type": "string" },
-        "size": { "type": "number" },
-        "content": { "type": "string" },
-        "email": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "teacherId": { "type": "string" },
-        "summary": { "type": "string" },
-        "createdAt": { "type": "string" },
-        "updatedAt": { "type": "string" }
-      },
-      "required": ["id", "fileName", "email", "content"]
-    },
-    "users": {
-      "title": "User Data & Role Authorization",
-      "description": "User profile with role-based access control (RBAC), schoolCode tenancy, and active status keyed by Firebase Authentication UID",
-      "properties": {
-        "userId": { "type": "string" },
-        "email": { "type": "string" },
-        "role": { "type": "string" },
-        "schoolCode": { "type": "string" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "gmail": { "type": "string", "maxLength": 200 },
+        "role": { "type": "string", "enum": ["teacher", "admin", "schoolAdmin"] },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "schoolName": { "type": "string", "maxLength": 200 },
         "active": { "type": "boolean" },
-        "displayName": { "type": "string" },
-        "photoURL": { "type": "string" },
-        "schoolName": { "type": "string" },
-        "lastSyncedAt": { "type": "string" },
-        "appData": { "type": "object" }
+        "status": { "type": "string", "maxLength": 40 },
+        "displayName": { "type": "string", "maxLength": 150 },
+        "name": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "dob": { "type": "string", "maxLength": 32 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
+        "deviceId": { "type": "string", "maxLength": 128 },
+        "lastSyncedAt": { "type": "string", "maxLength": 64 },
+        "teacherAccount": { "type": "object" },
+        "adminAccount": { "type": "object" },
+        "appData": { "type": "object" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
       },
-      "required": ["email", "role", "schoolCode", "active"]
+      "required": ["email", "role", "schoolCode"]
+    },
+    "admins": {
+      "title": "Verified School Administrator Registry",
+      "description": "Trusted administrator lookup records keyed by Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "gmail": { "type": "string", "maxLength": 200 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "adminName": { "type": "string", "maxLength": 150 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["admin", "schoolAdmin"] },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "uid", "email", "schoolCode", "role", "status"]
     },
     "email_accounts": {
       "title": "Email Account Multi-Device Sync",
-      "description": "Synchronized school, teacher, and administrator data keyed by user email across multiple devices",
+      "description": "Synchronized school, teacher, and administrator dataset keyed by normalized email with ownerUid enforcement",
+      "type": "object",
       "properties": {
-        "email": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "role": { "type": "string" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "role": { "type": "string", "maxLength": 40 },
+        "deviceId": { "type": "string", "maxLength": 128 },
         "teacherAccount": { "type": "object" },
         "adminAccount": { "type": "object" },
-        "lastSyncedAt": { "type": "string" },
-        "updatedAt": { "type": "string" },
+        "lastSyncedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
         "appData": { "type": "object" }
       },
-      "required": ["email"]
+      "required": ["ownerUid", "email", "schoolCode"]
     },
-    "broadcasts": {
-      "title": "Principal Announcement Broadcasts",
-      "description": "Announcements broadcasted by the school administrator to all teachers under the same school code",
+    "schools": {
+      "title": "School Tenant Root",
+      "description": "Institution root document scoped by schoolCode",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "senderName": { "type": "string" },
-        "title": { "type": "string" },
-        "message": { "type": "string" },
-        "priority": { "type": "string" },
-        "category": { "type": "string" },
-        "targetAudience": { "type": "string" },
-        "date": { "type": "string" },
-        "time": { "type": "string" },
-        "createdAt": { "type": "string" }
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
       },
-      "required": ["id", "schoolCode", "senderName", "title", "message", "priority"]
+      "required": ["schoolCode", "schoolName"]
+    },
+    "school_profile": {
+      "title": "School Profile Info",
+      "description": "Institution metadata and contact information",
+      "type": "object",
+      "properties": {
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "schoolAddress": { "type": "string", "maxLength": 400 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "schoolPhone": { "type": "string", "maxLength": 40 },
+        "schoolEmail": { "type": "string", "maxLength": 200 },
+        "principalName": { "type": "string", "maxLength": 150 },
+        "principalPhone": { "type": "string", "maxLength": 40 },
+        "designation": { "type": "string", "maxLength": 100 }
+      },
+      "required": ["schoolName", "schoolCode"]
     },
     "school_teachers": {
-      "title": "School Teachers Roster",
-      "description": "Teacher profile and assignment records associated with a specific School Code for the School Admin Panel",
+      "title": "Teacher Profile & Signup Record",
+      "description": "Teacher profile metadata keyed by Firebase Auth UID (passwords managed strictly by Firebase Auth)",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "name": { "type": "string" },
-        "dob": { "type": "string" },
-        "phone": { "type": "string" },
-        "schoolName": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "subject": { "type": "string" },
-        "primarySubject": { "type": "string" },
-        "standard": { "type": "string" },
-        "stream": { "type": "string" },
-        "section": { "type": "string" },
-        "assignedClass": { "type": "string" },
-        "designation": { "type": "string" },
-        "avatar": { "type": "string" },
-        "photoUrl": { "type": "string" },
-        "createdAt": { "type": "string" },
-        "lastActiveAt": { "type": "string" },
-        "recentActivity": { "type": "string" },
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 150 },
+        "fullName": { "type": "string", "maxLength": 150 },
+        "email": { "type": "string", "maxLength": 200 },
+        "gmail": { "type": "string", "maxLength": 200 },
+        "dob": { "type": "string", "maxLength": 32 },
+        "dateOfBirth": { "type": "string", "maxLength": 32 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "mobileNumber": { "type": "string", "maxLength": 40 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "academicYear": { "type": "string", "maxLength": 32 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "primarySubject": { "type": "string", "maxLength": 100 },
+        "standard": { "type": "string", "maxLength": 80 },
+        "stream": { "type": "string", "maxLength": 80 },
+        "section": { "type": "string", "maxLength": 20 },
+        "assignedClass": { "type": "string", "maxLength": 150 },
+        "teacherClassId": { "type": "string", "maxLength": 128 },
+        "designation": { "type": "string", "maxLength": 120 },
+        "isClassTeacher": { "type": "boolean" },
+        "avatar": { "type": "string", "maxLength": 40 },
+        "photoUrl": { "type": "string", "maxLength": 1500 },
+        "role": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "maxLength": 40 },
+        "accountStatus": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "lastActiveAt": { "type": "string", "maxLength": 64 },
+        "recentActivity": { "type": "string", "maxLength": 500 },
         "studentCount": { "type": "number" },
         "attendanceCount": { "type": "number" },
         "examCount": { "type": "number" }
       },
-      "required": ["id", "name", "schoolCode"]
+      "required": ["id", "uid", "name", "schoolCode"]
     },
-    "school_activities": {
-      "title": "School Real-time Activities",
-      "description": "Live activity logs of teacher actions synchronized with the School Admin Panel",
+    "email_directory": {
+      "title": "Email Profile Directory",
+      "description": "Normalized email directory linking Gmail and DOB to UID and School Code (no plaintext passwords)",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "teacherId": { "type": "string" },
-        "teacherName": { "type": "string" },
-        "subject": { "type": "string" },
-        "assignedClass": { "type": "string" },
-        "activityType": { "type": "string" },
-        "description": { "type": "string" },
-        "timestamp": { "type": "string" }
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "gmail": { "type": "string", "maxLength": 200 },
+        "email": { "type": "string", "maxLength": 200 },
+        "dob": { "type": "string", "maxLength": 32 },
+        "dateOfBirth": { "type": "string", "maxLength": 32 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "name": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "assignedClass": { "type": "string", "maxLength": 150 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "loginMethod": { "type": "string", "maxLength": 40 },
+        "role": { "type": "string", "maxLength": 40 },
+        "lastEntryAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
       },
-      "required": ["id", "schoolCode", "teacherName", "description", "timestamp"]
+      "required": ["uid", "email", "schoolCode", "role"]
     },
     "school_classes": {
       "title": "School Classes",
-      "description": "Classes created by teachers in the school, tagged with teacherId and schoolCode",
+      "description": "Classes created by teachers in the school, tagged with teacherUid and schoolCode",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "className": { "type": "string" },
-        "standard": { "type": "string" },
-        "stream": { "type": "string" },
-        "section": { "type": "string" },
-        "academicYear": { "type": "string" },
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "className": { "type": "string", "maxLength": 150 },
+        "standard": { "type": "string", "maxLength": 80 },
+        "stream": { "type": "string", "maxLength": 80 },
+        "section": { "type": "string", "maxLength": 20 },
+        "academicYear": { "type": "string", "maxLength": 32 },
         "classStrength": { "type": "number" },
-        "teacherId": { "type": "string" },
-        "teacherName": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "createdAt": { "type": "string" }
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 150 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "isTeacherCreated": { "type": "boolean" },
+        "createdByTeacherId": { "type": "string", "maxLength": 128 },
+        "createdByTeacherEmail": { "type": "string", "maxLength": 200 },
+        "attendanceCount": { "type": "number" },
+        "examCount": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "className", "schoolCode"]
     },
     "school_students": {
       "title": "School Students Roster",
-      "description": "Students enrolled in a specific class, tagged with classId, teacherId, and schoolCode",
+      "description": "Students enrolled in a specific class or school roster",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "rollNo": { "type": "number" },
-        "name": { "type": "string" },
-        "gender": { "type": "string" },
-        "classId": { "type": "string" },
-        "teacherId": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "phone": { "type": "string" },
-        "guardianName": { "type": "string" },
-        "guardianPhone": { "type": "string" },
-        "dob": { "type": "string" },
-        "admissionNo": { "type": "string" }
+        "admissionNo": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 150 },
+        "gender": { "type": "string", "enum": ["male", "female", "other"] },
+        "classId": { "type": "string", "maxLength": 128 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "parentName": { "type": "string", "maxLength": 150 },
+        "parentPhone": { "type": "string", "maxLength": 40 },
+        "guardianPhone": { "type": "string", "maxLength": 40 },
+        "division": { "type": "string", "maxLength": 40 },
+        "dob": { "type": "string", "maxLength": 32 },
+        "address": { "type": "string", "maxLength": 500 },
+        "bloodGroup": { "type": "string", "maxLength": 16 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "photoUrl": { "type": "string", "maxLength": 1500 },
+        "avatar": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "rollNo", "name", "schoolCode"]
     },
-    "cloud_files": {
-      "title": "Cloud Saved Files & Backups",
-      "description": "Database backup files, exported records, documents, and attachments stored in Firestore for a user Gmail and school",
+    "attendance_records": {
+      "title": "Daily Attendance Record",
+      "description": "Attendance snapshot for a class on a specific date",
+      "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "fileName": { "type": "string" },
-        "fileType": { "type": "string" },
-        "fileSize": { "type": "number" },
-        "data": { "type": "string" },
-        "email": { "type": "string" },
-        "schoolCode": { "type": "string" },
-        "userId": { "type": "string" },
-        "uploadedBy": { "type": "string" },
-        "uploadedAt": { "type": "string" },
-        "description": { "type": "string" }
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "maxLength": 32 },
+        "presentStudentIds": { "type": "array" },
+        "absentStudentIds": { "type": "array" },
+        "onDutyStudentIds": { "type": "array" },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "savedAt": { "type": "string", "maxLength": 64 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 }
       },
-      "required": ["id", "fileName", "email", "data", "uploadedAt"]
+      "required": ["id", "date", "classId", "schoolCode"]
+    },
+    "exams": {
+      "title": "Class Examination Definition",
+      "description": "Exam metadata and subject max marks for a class",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 150 },
+        "type": { "type": "string", "maxLength": 64 },
+        "date": { "type": "string", "maxLength": 32 },
+        "academicYear": { "type": "string", "maxLength": 32 },
+        "subjects": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "classId", "schoolCode"]
+    },
+    "exam_marks": {
+      "title": "Exam Marks Record",
+      "description": "Computed marks map for all students in an exam",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "marks": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["examId", "marks", "classId", "schoolCode"]
+    },
+    "timetables": {
+      "title": "School Timetable Slot",
+      "description": "Period assignment slot in weekly timetable",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "day": { "type": "string", "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] },
+        "periodNumber": { "type": "number" },
+        "startTime": { "type": "string", "maxLength": 32 },
+        "endTime": { "type": "string", "maxLength": 32 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "subjectCode": { "type": "string", "maxLength": 20 },
+        "className": { "type": "string", "maxLength": 150 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 150 },
+        "roomNumber": { "type": "string", "maxLength": 64 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "type": { "type": "string", "maxLength": 40 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "day", "periodNumber", "subject", "schoolCode"]
+    },
+    "timetable_prefs": {
+      "title": "Timetable Period Preferences",
+      "description": "Teacher or school period timing and Saturday toggle settings",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "includeSaturday": { "type": "boolean" },
+        "periodTimings": { "type": "array" },
+        "prefs": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["schoolCode", "updatedAt"]
+    },
+    "reminders": {
+      "title": "Teacher Task Reminder",
+      "description": "Scheduled task and reminder item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "date": { "type": "string", "maxLength": 32 },
+        "time": { "type": "string", "maxLength": 32 },
+        "repeat": { "type": "string", "enum": ["none", "daily", "weekly", "monthly"] },
+        "category": { "type": "string", "enum": ["attendance", "exam", "marks", "meeting", "general"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "isCompleted": { "type": "boolean" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "title", "date", "schoolCode"]
+    },
+    "broadcasts": {
+      "title": "Principal Announcement Broadcast",
+      "description": "Announcements broadcast by School Admin to teachers under same schoolCode",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "senderUid": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 150 },
+        "title": { "type": "string", "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 2000 },
+        "priority": { "type": "string", "enum": ["normal", "high", "urgent"] },
+        "category": { "type": "string", "maxLength": 40 },
+        "targetAudience": { "type": "string", "maxLength": 100 },
+        "date": { "type": "string", "maxLength": 32 },
+        "time": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "schoolCode", "senderName", "title", "message", "priority"]
+    },
+    "school_activities": {
+      "title": "School Real-time Activities",
+      "description": "Live activity logs of teacher actions synchronized with School Admin Panel",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 150 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "assignedClass": { "type": "string", "maxLength": 150 },
+        "activityType": { "type": "string", "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 500 },
+        "timestamp": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "schoolCode", "teacherName", "description", "timestamp"]
+    },
+    "audit_logs": {
+      "title": "School Audit Log Entry",
+      "description": "Security and administrative audit log item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "maxLength": 64 },
+        "user": { "type": "string", "maxLength": 200 },
+        "role": { "type": "string", "maxLength": 64 },
+        "action": { "type": "string", "maxLength": 200 },
+        "target": { "type": "string", "maxLength": 200 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["SUCCESS", "DENIED", "INFO", "WARNING", "ERROR"] }
+      },
+      "required": ["id", "timestamp", "user", "role", "action", "status"]
+    },
+    "login_activities": {
+      "title": "Login Access Log Entry",
+      "description": "Authentication audit trail per schoolCode",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "email": { "type": "string", "maxLength": 200 },
+        "accessMethod": { "type": "string", "maxLength": 80 },
+        "role": { "type": "string", "maxLength": 40 },
+        "success": { "type": "boolean" },
+        "details": { "type": "string", "maxLength": 500 },
+        "timestamp": { "type": "string", "maxLength": 64 },
+        "activityType": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "schoolCode", "email", "role", "success", "timestamp"]
+    },
+    "cloud_files": {
+      "title": "Cloud Storage File Metadata",
+      "description": "Metadata for photos, JSON/CSV backups, and PDFs stored in Firebase Storage",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "fileType": { "type": "string", "maxLength": 100 },
+        "contentType": { "type": "string", "maxLength": 100 },
+        "category": { "type": "string", "maxLength": 64 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "storagePath": { "type": "string", "maxLength": 500 },
+        "downloadUrl": { "type": "string", "maxLength": 1500 },
+        "size": { "type": "number" },
+        "email": { "type": "string", "maxLength": 200 },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "uploadedBy": { "type": "string", "maxLength": 150 },
+        "uploadedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["id", "ownerUid", "fileName", "storagePath", "downloadUrl", "schoolCode"]
+    },
+    "fcm_tokens": {
+      "title": "FCM Push Token Registration",
+      "description": "Device FCM push notification registration and category filter",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "maxLength": 512 },
+        "platform": { "type": "string", "enum": ["web", "android"] },
+        "userUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "schoolCode": { "type": "string", "maxLength": 64 },
+        "role": { "type": "string", "maxLength": 40 },
+        "preferences": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "userAgent": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["token", "userUid", "schoolCode", "platform"]
+    },
+    "notification_preferences": {
+      "title": "User Notification Preferences",
+      "description": "Notification category preferences keyed by Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "notices": { "type": "boolean" },
+        "exams": { "type": "boolean" },
+        "holidays": { "type": "boolean" },
+        "assignments": { "type": "boolean" },
+        "messages": { "type": "boolean" },
+        "accountUpdates": { "type": "boolean" },
+        "soundEnabled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["enabled", "updatedAt"]
+    },
+    "deleted_teacher_markers": {
+      "title": "Deleted Teacher Marker",
+      "description": "Temporary or permanent deletion marker managed by School Admin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "temporarilyDeleted": { "type": "boolean" },
+        "permanentlyDeleted": { "type": "boolean" },
+        "deletedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["deletedAt"]
+    },
+    "unauthorized_attempts": {
+      "title": "Unauthorized Access Attempt Log",
+      "description": "Security log capturing rejected admin login attempts",
+      "type": "object",
+      "properties": {
+        "attemptedEmail": { "type": "string", "maxLength": 200 },
+        "enteredSchoolCode": { "type": "string", "maxLength": 64 },
+        "reason": { "type": "string", "maxLength": 200 },
+        "timestamp": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["attemptedEmail", "reason", "timestamp"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "users",
-      "description": "User profile and data keyed by Firebase Auth UID"
+      "description": "Authenticated user profile & app sync data keyed by Firebase Auth UID"
+    },
+    "/admins/{userId}": {
+      "schema": "admins",
+      "description": "Verified School Administrator accounts keyed by Firebase Auth UID"
+    },
+    "/schoolAdmins/{userId}": {
+      "schema": "admins",
+      "description": "School Admin account mirror keyed by Firebase Auth UID"
     },
     "/email_accounts/{emailKey}": {
       "schema": "email_accounts",
-      "description": "Multi-device account and dataset keyed by normalized email"
+      "description": "Multi-device account bundle keyed by sanitized email with ownerUid enforcement"
+    },
+    "/teachers/{teacherId}": {
+      "schema": "school_teachers",
+      "description": "Top-level teacher directory keyed by teacher Firebase Auth UID"
+    },
+    "/teacherSignups/{teacherId}": {
+      "schema": "school_teachers",
+      "description": "Teacher signup records keyed by teacher Firebase Auth UID"
+    },
+    "/gmail/{emailKey}": {
+      "schema": "email_directory",
+      "description": "Email profile lookup index storing Gmail, DOB, UID, and schoolCode"
+    },
+    "/teacher_credentials/{emailKey}": {
+      "schema": "email_directory",
+      "description": "Teacher profile lookup index storing Gmail, DOB, UID, and schoolCode (no plaintext passwords)"
+    },
+    "/admin_credentials/{emailKey}": {
+      "schema": "email_directory",
+      "description": "Admin profile lookup index storing Gmail and schoolCode (no plaintext passwords)"
     },
     "/cloud_files/{fileId}": {
       "schema": "cloud_files",
-      "description": "Saved files, database snapshots, and exports stored in Firestore"
+      "description": "Metadata for files and images stored in Firebase Cloud Storage"
     },
     "/broadcasts/{broadcastId}": {
       "schema": "broadcasts",
       "description": "Notice board broadcast notices scoped by schoolCode"
     },
+    "/notification_preferences/{userId}": {
+      "schema": "notification_preferences",
+      "description": "Notification preferences keyed by Firebase Auth UID"
+    },
+    "/fcm_tokens/{userId}/tokens/{tokenId}": {
+      "schema": "fcm_tokens",
+      "description": "Device FCM push notification tokens keyed by user UID"
+    },
+    "/unauthorizedAttempts/{attemptId}": {
+      "schema": "unauthorized_attempts",
+      "description": "Audit log of rejected admin portal login attempts"
+    },
+    "/schools/{schoolCode}": {
+      "schema": "schools",
+      "description": "School tenant root document"
+    },
+    "/schools/{schoolCode}/schoolProfile/{docId}": {
+      "schema": "school_profile",
+      "description": "School profile information document"
+    },
+    "/schools/{schoolCode}/schoolAdmins/{adminId}": {
+      "schema": "admins",
+      "description": "Authorized School Admin records scoped to schoolCode"
+    },
     "/schools/{schoolCode}/teachers/{teacherId}": {
       "schema": "school_teachers",
-      "description": "Teacher profiles and assignments linked to the same schoolCode for admin view without email or password"
+      "description": "Active teachers linked to the same schoolCode for School Admin Panel"
+    },
+    "/schools/{schoolCode}/teacherSignups/{teacherId}": {
+      "schema": "school_teachers",
+      "description": "Teacher signups scoped by schoolCode"
     },
     "/schools/{schoolCode}/classes/{classId}": {
       "schema": "school_classes",
@@ -197,15 +568,63 @@
     },
     "/schools/{schoolCode}/classes/{classId}/students/{studentId}": {
       "schema": "school_students",
-      "description": "Students belonging to a specific class in the school"
+      "description": "Students enrolled in a class"
+    },
+    "/schools/{schoolCode}/classes/{classId}/attendance/{attendanceId}": {
+      "schema": "attendance_records",
+      "description": "Daily attendance records for a class"
+    },
+    "/schools/{schoolCode}/classes/{classId}/exams/{examId}": {
+      "schema": "exams",
+      "description": "Exam schedules for a class"
+    },
+    "/schools/{schoolCode}/classes/{classId}/examMarks/{examId}": {
+      "schema": "exam_marks",
+      "description": "Computed exam marks per exam in a class"
     },
     "/schools/{schoolCode}/students/{studentId}": {
       "schema": "school_students",
-      "description": "Global school students registry scoped by schoolCode"
+      "description": "School-wide students registry scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/timetables/{slotId}": {
+      "schema": "timetables",
+      "description": "Weekly timetable slots scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/timetablePrefs/{prefId}": {
+      "schema": "timetable_prefs",
+      "description": "Period timing and Saturday schedule preferences scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/reminders/{reminderId}": {
+      "schema": "reminders",
+      "description": "Task reminders scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/broadcasts/{broadcastId}": {
+      "schema": "broadcasts",
+      "description": "Principal circulars and announcements scoped by schoolCode"
     },
     "/schools/{schoolCode}/activities/{activityId}": {
       "schema": "school_activities",
-      "description": "Real-time activity log for teacher updates under a schoolCode"
+      "description": "Real-time teacher activity feed under schoolCode"
+    },
+    "/schools/{schoolCode}/auditLogs/{logId}": {
+      "schema": "audit_logs",
+      "description": "Administrative audit log entries scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/loginActivities/{actId}": {
+      "schema": "login_activities",
+      "description": "Login audit trail scoped by schoolCode"
+    },
+    "/schools/{schoolCode}/tokens/{userId}": {
+      "schema": "fcm_tokens",
+      "description": "Latest FCM registration token per user in school"
+    },
+    "/schools/{schoolCode}/temporarilyDeletedTeachers/{teacherId}": {
+      "schema": "deleted_teacher_markers",
+      "description": "Temporarily removed teacher records managed by School Admin"
+    },
+    "/schools/{schoolCode}/permanentlyDeletedTeachers/{teacherId}": {
+      "schema": "deleted_teacher_markers",
+      "description": "Permanently removed teacher markers managed by School Admin"
     }
   }
 }

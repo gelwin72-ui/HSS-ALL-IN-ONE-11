@@ -18,6 +18,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { SchoolProfile, ClassInfo, TeacherInfo } from '../types';
+import { auth, uploadFileToFirebaseStorage } from '../utils/firebase';
 
 interface SchoolProfileScreenProps {
   school: SchoolProfile;
@@ -388,18 +389,35 @@ export const SchoolProfileScreen: React.FC<SchoolProfileScreenProps> = ({
                     type="file"
                     accept="image/*"
                     className="hidden"
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onload = (event) => {
-                          const base64 = event.target?.result as string;
-                          if (base64) {
-                            setFormDataTeacher(prev => ({ ...prev, photoUrl: base64 }));
-                          }
-                        };
-                        reader.readAsDataURL(file);
+                      if (!file) return;
+                      const schoolCode = formDataSchool.schoolCode || school.schoolCode || 'SSHSS@111213';
+                      const entityId = auth?.currentUser?.uid || (formDataTeacher.email || 'teacher').replace(/[^a-zA-Z0-9_-]/g, '_');
+                      if (auth?.currentUser) {
+                        try {
+                          const uploaded = await uploadFileToFirebaseStorage({
+                            file,
+                            fileName: file.name || 'teacher-profile.jpg',
+                            category: 'teachers',
+                            schoolCode,
+                            entityId,
+                            description: `Teacher profile photo (${formDataTeacher.teacherName || 'Teacher'})`
+                          });
+                          setFormDataTeacher(prev => ({ ...prev, photoUrl: uploaded.downloadUrl }));
+                          return;
+                        } catch (uploadErr) {
+                          console.warn('Teacher photo Cloud Storage upload note:', uploadErr);
+                        }
                       }
+                      const reader = new FileReader();
+                      reader.onload = (event) => {
+                        const base64 = event.target?.result as string;
+                        if (base64) {
+                          setFormDataTeacher(prev => ({ ...prev, photoUrl: base64 }));
+                        }
+                      };
+                      reader.readAsDataURL(file);
                     }}
                   />
                 </label>
@@ -424,18 +442,35 @@ export const SchoolProfileScreen: React.FC<SchoolProfileScreenProps> = ({
                       type="file"
                       accept="image/*"
                       className="hidden"
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         const file = e.target.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            const base64 = event.target?.result as string;
-                            if (base64) {
-                              setFormDataTeacher(prev => ({ ...prev, photoUrl: base64 }));
-                            }
-                          };
-                          reader.readAsDataURL(file);
+                        if (!file) return;
+                        const schoolCode = formDataSchool.schoolCode || school.schoolCode || 'SSHSS@111213';
+                        const entityId = auth?.currentUser?.uid || (formDataTeacher.email || 'teacher').replace(/[^a-zA-Z0-9_-]/g, '_');
+                        if (auth?.currentUser) {
+                          try {
+                            const uploaded = await uploadFileToFirebaseStorage({
+                              file,
+                              fileName: file.name || 'teacher-profile.jpg',
+                              category: 'teachers',
+                              schoolCode,
+                              entityId,
+                              description: `Teacher profile photo (${formDataTeacher.teacherName || 'Teacher'})`
+                            });
+                            setFormDataTeacher(prev => ({ ...prev, photoUrl: uploaded.downloadUrl }));
+                            return;
+                          } catch (uploadErr) {
+                            console.warn('Teacher photo Cloud Storage upload note:', uploadErr);
+                          }
                         }
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          const base64 = event.target?.result as string;
+                          if (base64) {
+                            setFormDataTeacher(prev => ({ ...prev, photoUrl: base64 }));
+                          }
+                        };
+                        reader.readAsDataURL(file);
                       }}
                     />
                   </label>

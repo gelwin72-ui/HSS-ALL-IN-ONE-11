@@ -33,6 +33,7 @@ import { extractTextFromPDF, parseStudentsPDF } from '../utils/pdfHelper';
 import { calculateStudentAttendanceStats } from '../utils/calculations';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { StudentCameraModal } from '../components/StudentCameraModal';
+import { auth, uploadFileToFirebaseStorage } from '../utils/firebase';
 
 interface StudentManagementScreenProps {
   students: Student[];
@@ -169,13 +170,35 @@ export const StudentManagementScreen: React.FC<StudentManagementScreenProps> = (
   };
 
   // Handle Photo Captured from Camera or Upload
-  const handlePhotoCaptured = (photoDataUrl: string) => {
+  const handlePhotoCaptured = async (photoDataUrl: string) => {
+    const schoolCode = school?.schoolCode || 'SSHSS@111213';
+    const targetId = cameraTargetStudent?.id || editingStudent?.id || `st-${Date.now()}`;
+    let finalPhotoUrl = photoDataUrl;
+
+    if (auth?.currentUser && photoDataUrl.startsWith('data:')) {
+      try {
+        const resp = await fetch(photoDataUrl);
+        const blob = await resp.blob();
+        const uploaded = await uploadFileToFirebaseStorage({
+          file: blob,
+          fileName: `student-${targetId}.jpg`,
+          category: 'students',
+          schoolCode,
+          entityId: targetId,
+          description: `Student profile portrait (${targetId})`
+        });
+        finalPhotoUrl = uploaded.downloadUrl;
+      } catch (uploadErr) {
+        console.warn('Cloud Storage upload note for captured student photo:', uploadErr);
+      }
+    }
+
     if (isFormCamera) {
-      setFormPhotoUrl(photoDataUrl);
+      setFormPhotoUrl(finalPhotoUrl);
     } else if (cameraTargetStudent) {
       const updated: Student = {
         ...cameraTargetStudent,
-        photoUrl: photoDataUrl
+        photoUrl: finalPhotoUrl
       };
       onUpdateStudent(updated);
       if (selectedStudent && selectedStudent.id === cameraTargetStudent.id) {
@@ -191,6 +214,9 @@ export const StudentManagementScreen: React.FC<StudentManagementScreenProps> = (
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const schoolCode = school?.schoolCode || 'SSHSS@111213';
+    const targetId = editingStudent?.id || `st-${Date.now()}`;
+
     const reader = new FileReader();
     reader.onload = event => {
       const img = new Image();
@@ -204,7 +230,25 @@ export const StudentManagementScreen: React.FC<StudentManagementScreenProps> = (
           const sx = (img.width - minDim) / 2;
           const sy = (img.height - minDim) / 2;
           ctx.drawImage(img, sx, sy, minDim, minDim, 0, 0, 400, 400);
-          setFormPhotoUrl(canvas.toDataURL('image/jpeg', 0.85));
+          canvas.toBlob(async (blob) => {
+            if (blob && auth?.currentUser) {
+              try {
+                const uploaded = await uploadFileToFirebaseStorage({
+                  file: blob,
+                  fileName: `student-${targetId}.jpg`,
+                  category: 'students',
+                  schoolCode,
+                  entityId: targetId,
+                  description: `Student profile portrait (${formName || targetId})`
+                });
+                setFormPhotoUrl(uploaded.downloadUrl);
+                return;
+              } catch (uploadErr) {
+                console.warn('Cloud Storage upload error for student photo:', uploadErr);
+              }
+            }
+            setFormPhotoUrl(canvas.toDataURL('image/jpeg', 0.85));
+          }, 'image/jpeg', 0.85);
         }
       };
       img.src = event.target?.result as string;
