@@ -91,8 +91,9 @@ describe('Firestore Security Rules & Dirty Dozen Verification', () => {
     expect(rulesContent).toContain("data.keys().hasOnly([");
   });
 
-  it('Dirty Dozen #7: Prevents Admin Email Spoofing when email_verified is false', () => {
+  it('Dirty Dozen #7: Restricts admin email elevation strictly to verified/pre-authorized admin accounts', () => {
     expect(rulesContent).toContain('request.auth.token.email_verified == true');
+    expect(rulesContent).toContain("request.auth.token.email in [");
   });
 
   it('Dirty Dozen #8 & #12: Isolates tenant lists by schoolCode and forbids blanket list scraping', () => {

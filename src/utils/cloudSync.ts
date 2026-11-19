@@ -1025,16 +1025,17 @@ class CloudSyncManager {
       if (currentUser) {
         if (firestore) {
           const userDocRef = fsDoc(firestore, 'users', currentUser.uid);
+          const resolvedRole = activeSession.role === 'admin' ? 'admin' : 'teacher';
           const userPayload: Record<string, any> = {
             userId: currentUser.uid,
             uid: currentUser.uid,
             email: currentUser.email || syncEmail || '',
             gmail: currentUser.email || syncEmail || '',
-            displayName: currentUser.displayName || bundle.teacherInfo.teacherName || 'Teacher',
+            displayName: (currentUser.displayName || bundle.teacherInfo.teacherName || 'Teacher').slice(0, 150),
             lastSyncedAt: bundle.lastSyncedAt,
             deviceId: this.deviceId,
             schoolCode,
-            role: activeSession.role === 'admin' ? 'admin' : 'teacher',
+            role: resolvedRole,
             updatedAt: nowIso,
             appData: bundle
           };
@@ -1042,6 +1043,14 @@ class CloudSyncManager {
           if (sanitizedSessionAdmin) userPayload.adminAccount = sanitizedSessionAdmin;
 
           try {
+            const existingUserSnap = await fsGetDoc(userDocRef).catch(() => null);
+            if (existingUserSnap && existingUserSnap.exists()) {
+              const existingRole = existingUserSnap.data()?.role;
+              if (existingRole && existingRole !== resolvedRole && resolvedRole !== 'admin') {
+                // Never downgrade an existing admin user doc during non-admin sync
+                userPayload.role = existingRole;
+              }
+            }
             await fsSetDoc(userDocRef, userPayload, { merge: true });
           } catch (fsErr) {
             console.error('[CloudSync] Firestore users/{uid} write failed:', fsErr);
@@ -1065,37 +1074,48 @@ class CloudSyncManager {
         }
       }
 
-      // 2. Auto-sync current teacher profile to school directory in cloud (without plaintext passwords)
-      const currentTeacherAcc = sanitizedSessionTeacher || (bundle.teacherAccounts && bundle.teacherAccounts.length > 0 ? bundle.teacherAccounts[0] : null);
+      // 2. Auto-sync current teacher profile ONLY for non-admin teacher sessions whose profile matches currentUser
+      const currentTeacherAcc =
+        activeSession.role !== 'admin'
+          ? (sanitizedSessionTeacher ||
+              bundle.teacherAccounts?.find(
+                t =>
+                  t.uid === currentUser?.uid ||
+                  t.id === currentUser?.uid ||
+                  (syncEmail && (t.email || t.gmail || '').toLowerCase() === syncEmail.toLowerCase())
+              ) ||
+              null)
+          : null;
       if (currentUser && schoolCode && currentTeacherAcc && currentTeacherAcc.name) {
         const cleanTId = currentUser.uid;
         const cleanTEmail = (currentTeacherAcc.email || currentTeacherAcc.gmail || currentUser.email || '').trim().toLowerCase();
+        const rawPhotoUrl = String(currentTeacherAcc.photoUrl || '');
+        const safePhotoUrl = !rawPhotoUrl.startsWith('data:') && rawPhotoUrl.length <= 1450 ? rawPhotoUrl : '';
         const teacherProfileRecord: Record<string, any> = {
           id: cleanTId,
           uid: cleanTId,
-          name: currentTeacherAcc.name || bundle.teacherInfo.teacherName || 'Teacher',
-          email: cleanTEmail,
-          gmail: cleanTEmail,
-          dob: currentTeacherAcc.dob || '',
-          dateOfBirth: currentTeacherAcc.dob || '',
-          phone: currentTeacherAcc.phone || bundle.teacherInfo.phone || '',
-          schoolName: bundle.schoolProfile.schoolName || currentTeacherAcc.schoolName || "St. Sebastian's Higher Secondary School",
+          name: (currentTeacherAcc.name || bundle.teacherInfo.teacherName || 'Teacher').slice(0, 150),
+          email: cleanTEmail.slice(0, 200),
+          gmail: cleanTEmail.slice(0, 200),
+          dob: String(currentTeacherAcc.dob || '').slice(0, 32),
+          dateOfBirth: String(currentTeacherAcc.dob || '').slice(0, 32),
+          phone: String(currentTeacherAcc.phone || bundle.teacherInfo.phone || '').slice(0, 40),
+          schoolName: String(bundle.schoolProfile.schoolName || currentTeacherAcc.schoolName || "St. Sebastian's Higher Secondary School").slice(0, 200),
           schoolCode,
-          academicYear: currentTeacherAcc.academicYear || bundle.teacherInfo.academicYear || '2026-2027',
-          subject: currentTeacherAcc.subject || currentTeacherAcc.primarySubject || bundle.teacherInfo.designation || 'General',
-          primarySubject: currentTeacherAcc.primarySubject || currentTeacherAcc.subject || 'General',
-          standard: currentTeacherAcc.standard || bundle.classInfo.standard || '',
-          stream: currentTeacherAcc.stream || bundle.classInfo.stream || '',
-          section: currentTeacherAcc.section || bundle.classInfo.section || '',
-          assignedClass: currentTeacherAcc.assignedClass || bundle.classInfo.className || '',
-          designation: currentTeacherAcc.designation || bundle.teacherInfo.designation || 'Class Teacher',
-          photoUrl: currentTeacherAcc.photoUrl || '',
-          avatar: currentTeacherAcc.avatar || '👨‍🏫',
+          academicYear: String(currentTeacherAcc.academicYear || bundle.teacherInfo.academicYear || '2026-2027').slice(0, 32),
+          subject: String(currentTeacherAcc.subject || currentTeacherAcc.primarySubject || bundle.teacherInfo.designation || 'General').slice(0, 100),
+          primarySubject: String(currentTeacherAcc.primarySubject || currentTeacherAcc.subject || 'General').slice(0, 100),
+          standard: String(currentTeacherAcc.standard || bundle.classInfo.standard || '').slice(0, 80),
+          stream: String(currentTeacherAcc.stream || bundle.classInfo.stream || '').slice(0, 80),
+          section: String(currentTeacherAcc.section || bundle.classInfo.section || '').slice(0, 20),
+          assignedClass: String(currentTeacherAcc.assignedClass || bundle.classInfo.className || '').slice(0, 150),
+          designation: String(currentTeacherAcc.designation || bundle.teacherInfo.designation || 'Class Teacher').slice(0, 120),
+          photoUrl: safePhotoUrl,
+          avatar: String(currentTeacherAcc.avatar || '👨‍🏫').slice(0, 40),
           status: 'active',
-          createdAt: currentTeacherAcc.createdAt || nowIso,
           updatedAt: nowIso,
           lastActiveAt: nowIso,
-          recentActivity: currentTeacherAcc.recentActivity || `Active in ${bundle.classInfo.className || 'Classroom'}`
+          recentActivity: String(currentTeacherAcc.recentActivity || `Active in ${bundle.classInfo.className || 'Classroom'}`).slice(0, 500)
         };
 
         if (database) {
@@ -1103,6 +1123,11 @@ class CloudSyncManager {
           promises.push(set(ref(database, `teachers/${cleanTId}`), teacherProfileRecord).catch(() => {}));
         }
         if (firestore) {
+          const existingTeacherSnap = await fsGetDoc(fsDoc(firestore, `schools/${schoolCode}/teachers/${cleanTId}`)).catch(() => null);
+          const teacherWritePayload = existingTeacherSnap && existingTeacherSnap.exists()
+            ? teacherProfileRecord
+            : { ...teacherProfileRecord, createdAt: currentTeacherAcc.createdAt || nowIso };
+
           promises.push(
             fsSetDoc(fsDoc(firestore, `schools/${schoolCode}`), {
               schoolCode,
@@ -1110,10 +1135,10 @@ class CloudSyncManager {
               updatedAt: nowIso
             }, { merge: true }).catch(e => console.warn('Firestore schools root sync note:', e))
           );
-          promises.push(fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/teachers/${cleanTId}`), teacherProfileRecord, { merge: true }).catch(e => console.warn('Firestore school teacher sync note:', e)));
-          promises.push(fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/teacherSignups/${cleanTId}`), teacherProfileRecord, { merge: true }).catch(e => console.warn('Firestore school signup sync note:', e)));
-          promises.push(fsSetDoc(fsDoc(firestore, `teachers/${cleanTId}`), teacherProfileRecord, { merge: true }).catch(e => console.warn('Firestore root teacher sync note:', e)));
-          promises.push(fsSetDoc(fsDoc(firestore, `teacherSignups/${cleanTId}`), teacherProfileRecord, { merge: true }).catch(e => console.warn('Firestore root signup sync note:', e)));
+          promises.push(fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/teachers/${cleanTId}`), teacherWritePayload, { merge: true }).catch(e => console.warn('Firestore school teacher sync note:', e)));
+          promises.push(fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/teacherSignups/${cleanTId}`), teacherWritePayload, { merge: true }).catch(e => console.warn('Firestore school signup sync note:', e)));
+          promises.push(fsSetDoc(fsDoc(firestore, `teachers/${cleanTId}`), teacherWritePayload, { merge: true }).catch(e => console.warn('Firestore root teacher sync note:', e)));
+          promises.push(fsSetDoc(fsDoc(firestore, `teacherSignups/${cleanTId}`), teacherWritePayload, { merge: true }).catch(e => console.warn('Firestore root signup sync note:', e)));
           if (cleanTEmail) {
             const emailCredKey = this.sanitizeEmailKey(cleanTEmail);
             promises.push(fsSetDoc(fsDoc(firestore, `teacher_credentials/${emailCredKey}`), {
@@ -2182,34 +2207,35 @@ class CloudSyncManager {
     if (effectiveTeacherKey) StorageService.removeTemporarilyDeletedTeacherId(effectiveTeacherKey);
 
     const nowIso = new Date().toISOString();
+    const rawPhotoUrl = String(teacher.photoUrl || '');
+    const safePhotoUrl = !rawPhotoUrl.startsWith('data:') && rawPhotoUrl.length <= 1450 ? rawPhotoUrl : '';
     const sanitizedTeacherRecord: Record<string, any> = {
       id: effectiveTeacherKey,
       uid: effectiveTeacherKey,
-      name: teacher.name || 'Teacher',
-      gmail: cleanGmail,
-      email: cleanGmail,
+      name: (teacher.name || 'Teacher').slice(0, 150),
+      gmail: cleanGmail.slice(0, 200),
+      email: cleanGmail.slice(0, 200),
       status: 'active',
-      academicYear: teacher.academicYear || '',
-      dob: teacher.dob || '',
-      phone: teacher.phone || '',
-      schoolName: teacher.schoolName || "St. Sebastian's Higher Secondary School",
+      academicYear: String(teacher.academicYear || '').slice(0, 32),
+      dob: String(teacher.dob || '').slice(0, 32),
+      phone: String(teacher.phone || '').slice(0, 40),
+      schoolName: String(teacher.schoolName || "St. Sebastian's Higher Secondary School").slice(0, 200),
       schoolCode: cleanCode,
-      subject: teacher.subject || teacher.primarySubject || teacher.designation || '',
-      primarySubject: teacher.primarySubject || teacher.subject || '',
-      standard: teacher.standard || '',
-      stream: teacher.stream || '',
-      section: teacher.section || '',
-      assignedClass: teacher.assignedClass || '',
-      designation: teacher.designation || 'Class Teacher',
-      avatar: teacher.avatar || '👨‍🏫',
-      photoUrl: teacher.photoUrl || '',
-      createdAt: teacher.createdAt || nowIso,
+      subject: String(teacher.subject || teacher.primarySubject || teacher.designation || '').slice(0, 100),
+      primarySubject: String(teacher.primarySubject || teacher.subject || '').slice(0, 100),
+      standard: String(teacher.standard || '').slice(0, 80),
+      stream: String(teacher.stream || '').slice(0, 80),
+      section: String(teacher.section || '').slice(0, 20),
+      assignedClass: String(teacher.assignedClass || '').slice(0, 150),
+      designation: String(teacher.designation || 'Class Teacher').slice(0, 120),
+      avatar: String(teacher.avatar || '👨‍🏫').slice(0, 40),
+      photoUrl: safePhotoUrl,
       updatedAt: nowIso,
       lastActiveAt: nowIso,
-      recentActivity: teacher.recentActivity || `Active in ${teacher.assignedClass || 'Classroom'}`,
-      studentCount: teacher.studentCount || 0,
-      attendanceCount: teacher.attendanceCount || 0,
-      examCount: teacher.examCount || 0
+      recentActivity: String(teacher.recentActivity || `Active in ${teacher.assignedClass || 'Classroom'}`).slice(0, 500),
+      studentCount: Number(teacher.studentCount) || 0,
+      attendanceCount: Number(teacher.attendanceCount) || 0,
+      examCount: Number(teacher.examCount) || 0
     };
 
     if (database) {
@@ -2220,8 +2246,8 @@ class CloudSyncManager {
         }
         await remove(ref(database, `schools/${cleanCode}/deletedTeachers/${effectiveTeacherKey}`)).catch(() => {});
 
-        await update(ref(database, `teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord);
-        await update(ref(database, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord);
+        await update(ref(database, `teachers/${effectiveTeacherKey}`), { ...sanitizedTeacherRecord, createdAt: teacher.createdAt || nowIso });
+        await update(ref(database, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`), { ...sanitizedTeacherRecord, createdAt: teacher.createdAt || nowIso });
         await update(ref(database, `teacherSignups/${effectiveTeacherKey}`), {
           fullName: teacher.name,
           email: cleanGmail,
@@ -2242,12 +2268,20 @@ class CloudSyncManager {
       try {
         // Ensure user document exists with matching schoolCode BEFORE writing under schools/{schoolCode}
         if (auth?.currentUser?.uid === effectiveTeacherKey) {
+          const existingUserSnap = await fsGetDoc(fsDoc(firestore, `users/${effectiveTeacherKey}`)).catch(() => null);
+          const sessionRole = StorageService.getAuthSession().role;
+          const preservedRole =
+            existingUserSnap && existingUserSnap.exists()
+              ? existingUserSnap.data()?.role || (sessionRole === 'admin' ? 'admin' : 'teacher')
+              : sessionRole === 'admin'
+                ? 'admin'
+                : 'teacher';
           await fsSetDoc(fsDoc(firestore, `users/${effectiveTeacherKey}`), {
             userId: effectiveTeacherKey,
             uid: effectiveTeacherKey,
             email: cleanGmail || auth.currentUser.email || '',
             gmail: cleanGmail || auth.currentUser.email || '',
-            role: 'teacher',
+            role: preservedRole,
             schoolCode: cleanCode,
             schoolName: sanitizedTeacherRecord.schoolName,
             displayName: sanitizedTeacherRecord.name,
@@ -2264,20 +2298,35 @@ class CloudSyncManager {
           updatedAt: nowIso
         }, { merge: true });
 
-        const signupPayload = {
+        const [existingSchoolTeacherSnap, existingSignupSnap] = await Promise.all([
+          fsGetDoc(fsDoc(firestore, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`)).catch(() => null),
+          fsGetDoc(fsDoc(firestore, `schools/${cleanCode}/teacherSignups/${effectiveTeacherKey}`)).catch(() => null)
+        ]);
+
+        const teacherWritePayload =
+          existingSchoolTeacherSnap && existingSchoolTeacherSnap.exists()
+            ? sanitizedTeacherRecord
+            : { ...sanitizedTeacherRecord, createdAt: teacher.createdAt || nowIso };
+
+        const baseSignupPayload = {
           ...sanitizedTeacherRecord,
-          fullName: teacher.name || 'Teacher',
-          dateOfBirth: teacher.dob || '',
-          mobileNumber: teacher.phone || '',
+          fullName: (teacher.name || 'Teacher').slice(0, 150),
+          dateOfBirth: String(teacher.dob || '').slice(0, 32),
+          mobileNumber: String(teacher.phone || '').slice(0, 40),
           role: 'teacher',
           updatedAt: nowIso
         };
 
+        const signupWritePayload =
+          existingSignupSnap && existingSignupSnap.exists()
+            ? baseSignupPayload
+            : { ...baseSignupPayload, createdAt: teacher.createdAt || nowIso };
+
         await Promise.all([
-          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord, { merge: true }),
-          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teacherSignups/${effectiveTeacherKey}`), signupPayload, { merge: true }),
-          fsSetDoc(fsDoc(firestore, `teachers/${effectiveTeacherKey}`), sanitizedTeacherRecord, { merge: true }),
-          fsSetDoc(fsDoc(firestore, `teacherSignups/${effectiveTeacherKey}`), signupPayload, { merge: true })
+          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teachers/${effectiveTeacherKey}`), teacherWritePayload, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/teacherSignups/${effectiveTeacherKey}`), signupWritePayload, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teachers/${effectiveTeacherKey}`), teacherWritePayload, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `teacherSignups/${effectiveTeacherKey}`), signupWritePayload, { merge: true })
         ]);
       } catch (fsErr) {
         console.error('Firestore saveTeacherToSchool error:', fsErr);
@@ -4944,7 +4993,7 @@ class CloudSyncManager {
       updatedAt: nowIso
     };
 
-    // Bootstrap /admins/{uid} via trusted server endpoint when available so both Email/Password and Google admins hold verified /admins/{uid} rules access
+    // Verify pre-authorized School Admin token with backend (zero-IAM)
     if (auth?.currentUser) {
       try {
         const idToken = await auth.currentUser.getIdToken();
@@ -4962,7 +5011,7 @@ class CloudSyncManager {
           })
         }).catch(() => null);
       } catch (e) {
-        console.warn('Admin bootstrap note:', e);
+        console.warn('Admin token verification note:', e);
       }
     }
 
@@ -4987,8 +5036,24 @@ class CloudSyncManager {
 
     if (firestore) {
       try {
-        await Promise.allSettled([
-          fsSetDoc(fsDoc(firestore, `admins/${resolvedUid}`), adminData, { merge: true }),
+        // Create/update /admins/{uid} FIRST so /admins/{uid} exists for subsequent admin rule checks
+        await fsSetDoc(fsDoc(firestore, `admins/${resolvedUid}`), adminData, { merge: true });
+        await fsSetDoc(fsDoc(firestore, `users/${resolvedUid}`), {
+          userId: resolvedUid,
+          uid: resolvedUid,
+          email: cleanEmail,
+          gmail: cleanEmail,
+          role: 'admin',
+          schoolCode: cleanSchoolCode,
+          schoolName: adminData.schoolName,
+          active: true,
+          status: 'active',
+          displayName: adminData.adminName,
+          name: adminData.adminName,
+          updatedAt: nowIso
+        }, { merge: true });
+
+        await Promise.all([
           fsSetDoc(fsDoc(firestore, `schoolAdmins/${resolvedUid}`), adminData, { merge: true }),
           fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/schoolAdmins/${resolvedUid}`), adminData, { merge: true }),
           fsSetDoc(fsDoc(firestore, `admin_credentials/${emailKey}`), {
@@ -5002,7 +5067,8 @@ class CloudSyncManager {
           }, { merge: true })
         ]);
       } catch (e) {
-        console.warn('Firestore admin sync note:', e);
+        console.error('Firestore admin sync error:', e);
+        handleFirestoreError(e, OperationType.WRITE, `admins/${resolvedUid}`);
       }
     }
 

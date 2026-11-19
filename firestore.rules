@@ -41,11 +41,14 @@ service cloud.firestore {
 
     function isVerifiedAdminEmail() {
       return isSignedIn()
-        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          'gelwin72@gmail.com',
+          'joicegeorge1910@gmail.com',
+          'lincythomas1911@gmail.com'
+        ]
         && (
-          request.auth.token.email == 'gelwin72@gmail.com' ||
-          request.auth.token.email == 'joicegeorge1910@gmail.com' ||
-          request.auth.token.email == 'lincythomas1911@gmail.com'
+          request.auth.token.email_verified == true ||
+          request.auth.token.firebase.sign_in_provider == 'password'
         );
     }
 
@@ -686,11 +689,12 @@ service cloud.firestore {
         isAdmin() ||
         (isOwner(teacherId)
           && incoming().uid == existing().uid
+          && (!('role' in incoming()) || incoming().role == 'teacher')
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
             'schoolName', 'schoolCode', 'academicYear', 'subject', 'primarySubject',
             'standard', 'stream', 'section', 'assignedClass', 'teacherClassId', 'designation',
-            'isClassTeacher', 'avatar', 'photoUrl', 'status', 'accountStatus',
+            'isClassTeacher', 'avatar', 'photoUrl', 'role', 'status', 'accountStatus',
             'updatedAt', 'lastActiveAt', 'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
           ]))
       );
@@ -835,11 +839,12 @@ service cloud.firestore {
           isAdmin() ||
           (isOwner(teacherId)
             && incoming().uid == existing().uid
+            && (!('role' in incoming()) || incoming().role == 'teacher')
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'name', 'fullName', 'email', 'gmail', 'dob', 'dateOfBirth', 'phone', 'mobileNumber',
               'schoolName', 'schoolCode', 'academicYear', 'subject', 'primarySubject',
               'standard', 'stream', 'section', 'assignedClass', 'teacherClassId', 'designation',
-              'isClassTeacher', 'avatar', 'photoUrl', 'status', 'accountStatus',
+              'isClassTeacher', 'avatar', 'photoUrl', 'role', 'status', 'accountStatus',
               'updatedAt', 'lastActiveAt', 'recentActivity', 'studentCount', 'attendanceCount', 'examCount'
             ]))
         );

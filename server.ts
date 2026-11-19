@@ -91,7 +91,7 @@ async function startServer() {
     });
   });
 
-  // Bootstrap verified pre-authorized school administrator record in Firestore
+  // Verify pre-authorized school administrator Firebase Auth ID token (zero-IAM compatible)
   app.post("/api/admin/bootstrap", async (req, res) => {
     try {
       const authHeader = req.headers.authorization || "";
@@ -112,49 +112,16 @@ async function startServer() {
         return res.status(403).json({ error: "Email or schoolCode is not authorized for School Admin privileges" });
       }
 
-      const now = new Date().toISOString();
-      const adminName = String(req.body?.adminName || decoded.name || email.split("@")[0]).trim();
-      const schoolName = String(req.body?.schoolName || "St. Sebastian's Higher Secondary School Koodaranhi").trim();
-      const designation = String(req.body?.designation || "Principal & School Administrator").trim();
-
-      const adminDoc = {
-        id: decoded.uid,
+      return res.json({
+        success: true,
+        verified: true,
         uid: decoded.uid,
         email,
-        gmail: email,
-        schoolCode: ALLOWED_ADMIN_SCHOOL_CODE,
-        schoolName,
-        adminName,
-        designation,
-        role: "admin",
-        status: "active",
-        createdAt: now,
-        updatedAt: now
-      };
-
-      await Promise.all([
-        adminServices.firestore.doc(`admins/${decoded.uid}`).set(adminDoc, { merge: true }),
-        adminServices.firestore.doc(`schoolAdmins/${decoded.uid}`).set(adminDoc, { merge: true }),
-        adminServices.firestore.doc(`schools/${ALLOWED_ADMIN_SCHOOL_CODE}/schoolAdmins/${decoded.uid}`).set(adminDoc, { merge: true }),
-        adminServices.firestore.doc(`users/${decoded.uid}`).set({
-          userId: decoded.uid,
-          uid: decoded.uid,
-          email,
-          gmail: email,
-          role: "admin",
-          schoolCode: ALLOWED_ADMIN_SCHOOL_CODE,
-          schoolName,
-          active: true,
-          status: "active",
-          displayName: adminName,
-          name: adminName,
-          updatedAt: now
-        }, { merge: true })
-      ]);
-
-      return res.json({ success: true, uid: decoded.uid, schoolCode: ALLOWED_ADMIN_SCHOOL_CODE });
+        emailVerified: Boolean(decoded.email_verified),
+        schoolCode: ALLOWED_ADMIN_SCHOOL_CODE
+      });
     } catch (err: any) {
-      console.error("[Admin Bootstrap Error]:", err);
+      console.warn("[Admin Bootstrap Warning]:", err?.message || err);
       return res.status(401).json({ error: err?.message || "Failed to verify School Admin token" });
     }
   });
