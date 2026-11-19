@@ -125,7 +125,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 alt="HSS ALL IN ONE Logo"
                 className="w-7 h-7 object-contain"
                 onError={(e) => {
-                  e.currentTarget.src = '/logo.png';
+                  e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
                 }}
               />
             </div>
@@ -445,7 +445,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   alt="HSS ALL IN ONE Logo"
                   className="w-6 h-6 object-contain"
                   onError={(e) => {
-                    e.currentTarget.src = '/logo.png';
+                    e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
                   }}
                 />
               </div>

@@ -21,7 +21,11 @@ export async function initOneSignal(): Promise<boolean> {
   initPromise = (async () => {
     try {
       // Determine service worker path dynamically for GitHub Pages sub-directories vs root domain
-      const baseUrl = import.meta.env.BASE_URL || '/';
+      let baseUrl = import.meta.env.BASE_URL || '/';
+      if (baseUrl === './' || baseUrl === '.') {
+        const pathname = window.location.pathname || '/';
+        baseUrl = pathname.endsWith('/') ? pathname : `${pathname.substring(0, pathname.lastIndexOf('/') + 1) || '/'}`;
+      }
       const swPath = baseUrl.endsWith('/') ? `${baseUrl}OneSignalSDKWorker.js` : `${baseUrl}/OneSignalSDKWorker.js`;
 
       await (OneSignal.init as any)({

@@ -1,7 +1,7 @@
 {
-  "id": "/HSS-ALL-IN-ONE/",
+  "id": "./",
   "name": "HSS ALL IN ONE",
-  "short_name": "HSS ALL IN ONE",
+  "short_name": "HSS AllInOne",
   "description": "HSS ALL IN ONE is an educational resource platform for Higher Secondary students, providing study materials, notes, PDFs, question papers and useful academic resources.",
   "start_url": "./",
   "scope": "./",

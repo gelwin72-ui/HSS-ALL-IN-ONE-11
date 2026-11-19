@@ -5,9 +5,9 @@
 importScripts('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js');
 
-// Base path constant for HSS ALL IN ONE deployment (detects GitHub Pages repo subpath vs root)
-const BASE_PATH = (self.location && self.location.pathname.includes('/HSS-ALL-IN-ONE-App-/'))
-  ? '/HSS-ALL-IN-ONE-App-/'
+// Base path constant for HSS ALL IN ONE deployment (dynamically detects GitHub Pages repo subpath vs root)
+const BASE_PATH = (self.location && self.location.pathname)
+  ? (self.location.pathname.replace(/[^/]+$/, '') || '/')
   : '/';
 
 // Service worker immediate activation

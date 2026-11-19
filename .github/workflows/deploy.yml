@@ -48,7 +48,11 @@ jobs:
             echo "Error: dist/index.html not found" >&2
             exit 1
           fi
-          echo "Build verification successful. Assets generated:"
+          if [ ! -f "dist/sw.js" ] || [ ! -f "dist/manifest.webmanifest" ]; then
+            echo "Error: PWA service worker or manifest not generated in dist/" >&2
+            exit 1
+          fi
+          echo "Build verification successful for repository: $GITHUB_REPOSITORY. Assets generated:"
           ls -la dist
 
       - name: Setup Pages

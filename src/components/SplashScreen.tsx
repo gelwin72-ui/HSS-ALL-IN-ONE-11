@@ -46,7 +46,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
               alt="HSS ALL IN ONE Logo"
               className="w-16 h-16 object-contain"
               onError={(e) => {
-                e.currentTarget.src = '/logo.png';
+                e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
               }}
             />
           </div>

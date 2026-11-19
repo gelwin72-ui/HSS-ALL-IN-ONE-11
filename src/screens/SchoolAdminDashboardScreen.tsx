@@ -1772,7 +1772,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
                 alt="HSS ALL IN ONE Logo"
                 className="w-8 h-8 sm:w-9 sm:h-9 object-contain rounded-lg"
                 onError={(e) => {
-                  e.currentTarget.src = '/logo.png';
+                  e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
                 }}
               />
             </div>

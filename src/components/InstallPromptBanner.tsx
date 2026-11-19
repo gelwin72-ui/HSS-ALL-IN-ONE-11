@@ -122,7 +122,7 @@ export function InstallPromptBanner() {
                 alt="HSS ALL IN ONE Logo"
                 className="w-8 h-8 object-contain"
                 onError={(e) => {
-                  e.currentTarget.src = '/logo.png';
+                  e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
                 }}
               />
             </div>

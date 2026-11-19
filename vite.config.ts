@@ -5,9 +5,27 @@ import fs from 'fs';
 import {defineConfig} from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || !!process.env.VERCEL_URL;
-  const basePath = isVercel ? '/' : '/HSS-ALL-IN-ONE-11/';
+  const explicitBase = process.env.VITE_BASE_PATH?.trim();
+  const githubRepo = process.env.GITHUB_REPOSITORY?.trim();
+
+  let basePath = '/';
+  if (command === 'serve') {
+    basePath = '/';
+  } else if (explicitBase) {
+    basePath = explicitBase === './' ? './' : `/${explicitBase.replace(/^\/+|\/+$/g, '')}/`.replace(/^\/\/$/, '/');
+  } else if (isVercel) {
+    basePath = '/';
+  } else if (githubRepo && githubRepo.includes('/')) {
+    const repoName = githubRepo.split('/')[1];
+    basePath = repoName && !repoName.endsWith('.github.io') ? `/${repoName}/` : '/';
+  } else {
+    basePath = './';
+  }
+
+  const manifestBase = basePath === './' ? './' : basePath;
+
   return {
     base: basePath,
     plugins: [
@@ -19,8 +37,11 @@ export default defineConfig(() => {
         workbox: {
           maximumFileSizeToCacheInBytes: 5000000,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,json,xml,txt}'],
-          navigateFallback: `${basePath}index.html`,
-          navigateFallbackAllowlist: [/^(?!\/__).*/],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
+          navigateFallback: command === 'build' ? 'index.html' : undefined,
+          navigateFallbackDenylist: [/^\/__/, /\/api\//, /firebase-messaging-sw\.js$/, /OneSignalSDK.*\.js$/],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\/.*/i,
@@ -51,16 +72,19 @@ export default defineConfig(() => {
             },
           ],
         },
+        devOptions: {
+          enabled: false,
+        },
         manifest: {
-          id: basePath,
+          id: manifestBase,
           name: 'HSS ALL IN ONE',
-          short_name: 'HSS ALL IN ONE',
+          short_name: 'HSS AllInOne',
           description: 'HSS ALL IN ONE is an educational resource platform for Higher Secondary students, providing study materials, notes, PDFs, question papers and useful academic resources.',
           theme_color: '#0F1115',
           background_color: '#0F1115',
           display: 'standalone',
-          scope: basePath,
-          start_url: basePath,
+          scope: manifestBase,
+          start_url: manifestBase,
           orientation: 'portrait-primary',
           categories: ['education', 'productivity', 'utilities'],
           icons: [
@@ -126,28 +150,28 @@ export default defineConfig(() => {
               name: 'Daily Attendance',
               short_name: 'Attendance',
               description: 'Mark attendance and generate absentee register',
-              url: `${basePath}#attendance`,
+              url: `${manifestBase}#attendance`,
               icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }]
             },
             {
               name: 'Exam Marks & Ranks',
               short_name: 'Exams',
               description: 'Enter exam marks and compute ranks',
-              url: `${basePath}#exams`,
+              url: `${manifestBase}#exams`,
               icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }]
             },
             {
               name: 'Academic PDF Reports',
               short_name: 'Reports',
               description: 'Generate and download classroom PDF reports',
-              url: `${basePath}#reports`,
+              url: `${manifestBase}#reports`,
               icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }]
             },
             {
               name: 'School Admin Portal',
               short_name: 'School Admin',
               description: 'Institutional administrator dashboard',
-              url: `${basePath}#school-admin`,
+              url: `${manifestBase}#school-admin`,
               icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }]
             }
           ]

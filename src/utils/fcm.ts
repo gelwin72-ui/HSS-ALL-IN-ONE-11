@@ -55,8 +55,15 @@ export function isDuplicateNotification(title: string, body: string): boolean {
  * Returns active base path respecting GitHub Pages deployment
  */
 export function getAppBasePath(): string {
-  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/HSS-ALL-IN-ONE-App-')) {
-    return '/HSS-ALL-IN-ONE-App-/';
+  const viteBase = (typeof import.meta !== 'undefined' && (import.meta as any).env?.BASE_URL) || '';
+  if (viteBase && viteBase !== './' && viteBase !== '.') {
+    return viteBase.endsWith('/') ? viteBase : `${viteBase}/`;
+  }
+  if (typeof window !== 'undefined') {
+    const match = window.location.pathname.match(/^\/(HSS-ALL-IN-ONE[^/]*)(?:\/|$)/i);
+    if (match) {
+      return `/${match[1]}/`;
+    }
   }
   return '/';
 }
@@ -257,7 +264,7 @@ export async function requestAndSaveFCMToken(
       await navigator.serviceWorker.ready;
     } catch (swErr) {
       console.warn('[FCM] Service worker registration failed with base scope, trying default scope:', swErr);
-      registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+      registration = await navigator.serviceWorker.register(swUrl);
       await navigator.serviceWorker.ready;
     }
 

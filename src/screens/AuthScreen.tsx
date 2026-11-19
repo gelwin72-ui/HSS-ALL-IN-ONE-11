@@ -1030,7 +1030,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
               alt="HSS ALL IN ONE Logo"
               className="w-14 h-14 object-contain"
               onError={(e) => {
-                e.currentTarget.src = '/logo.png';
+                e.currentTarget.src = `${import.meta.env.BASE_URL || './'}logo.png`;
               }}
             />
           </div>
