@@ -301,7 +301,9 @@ export const StorageService = {
           ...DEFAULT_SCHOOL_PROFILE,
           ...parsed,
           schoolName: (parsed.schoolName && parsed.schoolName.trim()) ? parsed.schoolName.trim() : DEFAULT_SCHOOL_PROFILE.schoolName,
-          schoolCode: (parsed.schoolCode && parsed.schoolCode.trim()) ? parsed.schoolCode.trim().toUpperCase() : DEFAULT_SCHOOL_PROFILE.schoolCode,
+          schoolCode: (parsed.schoolCode && parsed.schoolCode.trim())
+            ? parsed.schoolCode.trim().toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_\-.@]/g, '_').slice(0, 64)
+            : DEFAULT_SCHOOL_PROFILE.schoolCode,
           principalName: (parsed.principalName && parsed.principalName.trim()) ? parsed.principalName.trim() : DEFAULT_SCHOOL_PROFILE.principalName
         };
       }

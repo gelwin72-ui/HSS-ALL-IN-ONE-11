@@ -219,7 +219,8 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth',
           'schoolCode', 'schoolName', 'name', 'phone', 'subject',
-          'assignedClass', 'designation', 'loginMethod', 'role',
+          'assignedClass', 'designation', 'loginMethod', 'authProvider',
+          'passwordProtected', 'credentialStatus', 'role',
           'lastEntryAt', 'updatedAt'
         ])
         && data.uid is string && data.uid.size() <= 128
@@ -237,6 +238,9 @@ service cloud.firestore {
         && isOptionalString(data, 'assignedClass', 150)
         && isOptionalString(data, 'designation', 100)
         && isOptionalString(data, 'loginMethod', 40)
+        && isOptionalString(data, 'authProvider', 40)
+        && isOptionalBool(data, 'passwordProtected')
+        && isOptionalString(data, 'credentialStatus', 80)
         && isOptionalString(data, 'lastEntryAt', 64)
         && isOptionalString(data, 'updatedAt', 64);
     }
@@ -712,7 +716,8 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth', 'schoolCode',
             'schoolName', 'name', 'phone', 'subject', 'assignedClass',
-            'designation', 'loginMethod', 'lastEntryAt', 'updatedAt'
+            'designation', 'loginMethod', 'authProvider', 'passwordProtected',
+            'credentialStatus', 'lastEntryAt', 'updatedAt'
           ]))
       );
       allow delete: if isValidKey(emailKey) && isAdmin();
@@ -729,7 +734,8 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth', 'schoolCode',
             'schoolName', 'name', 'phone', 'subject', 'assignedClass',
-            'designation', 'loginMethod', 'lastEntryAt', 'updatedAt'
+            'designation', 'loginMethod', 'authProvider', 'passwordProtected',
+            'credentialStatus', 'lastEntryAt', 'updatedAt'
           ]))
       );
       allow delete: if isValidKey(emailKey) && isAdmin();
@@ -849,6 +855,30 @@ service cloud.firestore {
             ]))
         );
         allow delete: if isValidKey(schoolCode) && isValidId(teacherId) && isAdmin();
+      }
+
+      match /gmail/{emailKey} {
+        allow get: if isValidKey(schoolCode) && isValidKey(emailKey) && isSignedIn()
+          && (resource == null || isAdmin() || (isUserInSchool(schoolCode) && existing().uid == request.auth.uid));
+        allow list: if isSignedIn() && existing().schoolCode == schoolCode
+          && (isAdmin() || (isUserInSchool(schoolCode) && existing().uid == request.auth.uid));
+        allow create: if isValidKey(schoolCode) && isValidKey(emailKey) && isSignedIn()
+          && isValidEmailDirectory(incoming()) && incoming().schoolCode == schoolCode
+          && ((incoming().uid == request.auth.uid && isUserInSchool(schoolCode)) || isAdmin());
+        allow update: if isValidKey(schoolCode) && isValidKey(emailKey) && isSignedIn()
+          && isValidEmailDirectory(incoming()) && incoming().schoolCode == schoolCode && (
+          isAdmin() ||
+          (isUserInSchool(schoolCode)
+            && existing().uid == request.auth.uid
+            && incoming().uid == existing().uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'teacherId', 'gmail', 'email', 'dob', 'dateOfBirth', 'schoolCode',
+              'schoolName', 'name', 'phone', 'subject', 'assignedClass',
+              'designation', 'loginMethod', 'authProvider', 'passwordProtected',
+              'credentialStatus', 'lastEntryAt', 'updatedAt'
+            ]))
+        );
+        allow delete: if isValidKey(schoolCode) && isValidKey(emailKey) && isAdmin();
       }
 
       match /classes/{classId} {

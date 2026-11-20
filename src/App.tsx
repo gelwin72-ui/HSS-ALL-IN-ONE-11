@@ -280,7 +280,7 @@ export function App() {
     setAuthRole('teacher');
     setCurrentAdmin(null);
     setIsAuthenticated(true);
-    const schoolCode = account.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    const schoolCode = CloudSync.sanitizeSchoolCode(account.schoolCode || StorageService.getSchoolProfile().schoolCode);
     requestAndSaveFCMToken(uid, schoolCode).catch(() => {});
     setOneSignalUser({
       userId: uid,
@@ -294,8 +294,24 @@ export function App() {
       subject: account.subject || account.primarySubject
     }).catch(() => {});
 
-    // Save teacher profile to school admin roster immediately & sync cloud state
+    // Save teacher profile, Gmail directory record & school profile under active schoolCode
     CloudSync.saveTeacherToSchool(schoolCode, account).catch(() => {});
+    CloudSync.saveSchoolProfileToSchool(schoolCode, StorageService.getSchoolProfile()).catch(() => {});
+    if (email) {
+      CloudSync.recordGmailEntry(email, {
+        role: 'teacher',
+        name: account.name,
+        schoolCode,
+        schoolName: account.schoolName,
+        dob: account.dob || '',
+        teacherId: uid,
+        uid,
+        phone: account.phone,
+        subject: account.subject || account.primarySubject,
+        assignedClass: account.assignedClass,
+        designation: account.designation
+      }).catch(() => {});
+    }
     CloudSync.syncAllTeacherClassesToSchool(schoolCode, uid, account.email || account.gmail).catch(() => {});
     CloudSync.recordTeacherActivity(schoolCode, {
       teacherId: uid,
@@ -393,17 +409,53 @@ export function App() {
     newClass: ClassInfo,
     newTeacher: TeacherInfo
   ) => {
-    StorageService.saveSchoolProfile(newSchool);
-    StorageService.saveClassInfo(newClass, activeClassId);
-    StorageService.saveTeacherInfo(newTeacher);
-    setSchool(newSchool);
-    setClassInfo(newClass);
-    setTeacher(newTeacher);
-    setClassesList(StorageService.getClassesList());
-
     const session = StorageService.getAuthSession();
     const currentTeacher = session.currentTeacher;
-    const schoolCode = currentTeacher?.schoolCode || newSchool.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213';
+    const prevSchoolCode = CloudSync.sanitizeSchoolCode(currentTeacher?.schoolCode || school.schoolCode);
+    const schoolCode = CloudSync.sanitizeSchoolCode(newSchool.schoolCode || currentTeacher?.schoolCode || school.schoolCode);
+    const normalizedSchool: SchoolProfile = { ...newSchool, schoolCode };
+
+    StorageService.saveSchoolProfile(normalizedSchool);
+    StorageService.saveClassInfo(newClass, activeClassId);
+    StorageService.saveTeacherInfo(newTeacher);
+    setSchool(normalizedSchool);
+    setClassInfo(newClass);
+    setTeacher(newTeacher);
+
+    const updatedTeacherAccount: TeacherAccount | null = currentTeacher
+      ? {
+          ...currentTeacher,
+          schoolName: normalizedSchool.schoolName || currentTeacher.schoolName,
+          schoolCode,
+          name: newTeacher.teacherName || currentTeacher.name,
+          phone: newTeacher.phone ?? currentTeacher.phone,
+          email: newTeacher.email || currentTeacher.email,
+          gmail: newTeacher.email || currentTeacher.gmail,
+          designation: newTeacher.designation || currentTeacher.designation,
+          photoUrl: newTeacher.photoUrl ?? currentTeacher.photoUrl,
+          dob: newTeacher.dob ?? currentTeacher.dob,
+          academicYear: newTeacher.academicYear ?? currentTeacher.academicYear,
+          lastActiveAt: new Date().toISOString()
+        }
+      : null;
+
+    if (updatedTeacherAccount) {
+      StorageService.setAuthSession({
+        ...session,
+        currentTeacher: updatedTeacherAccount
+      });
+      const existingTeachers = StorageService.getTeacherAccounts();
+      const tIdx = existingTeachers.findIndex(
+        t => t.id === updatedTeacherAccount.id || (t.uid && t.uid === updatedTeacherAccount.uid)
+      );
+      if (tIdx >= 0) {
+        existingTeachers[tIdx] = updatedTeacherAccount;
+      } else {
+        existingTeachers.push(updatedTeacherAccount);
+      }
+      StorageService.saveTeacherAccounts(existingTeachers);
+    }
+
     const classes = StorageService.getClassesList();
     const existingCls = classes.find(c => c.id === activeClassId);
     const updatedClassItem: ClassItem = {
@@ -414,45 +466,53 @@ export function App() {
       section: newClass.section,
       academicYear: newClass.academicYear,
       classStrength: existingCls?.classStrength || students.length || newClass.classStrength || 0,
-      teacherId: currentTeacher?.id || existingCls?.teacherId || '',
-      teacherUid: currentTeacher?.id || existingCls?.teacherUid || '',
-      teacherName: currentTeacher?.name || newTeacher.teacherName || '',
-      schoolCode: schoolCode,
+      teacherId: updatedTeacherAccount?.id || existingCls?.teacherId || '',
+      teacherUid: updatedTeacherAccount?.id || existingCls?.teacherUid || '',
+      teacherName: updatedTeacherAccount?.name || newTeacher.teacherName || '',
+      schoolCode,
       isTeacherCreated: true,
-      createdByTeacherId: currentTeacher?.id || existingCls?.createdByTeacherId || '',
-      createdByTeacherEmail: currentTeacher?.email || currentTeacher?.gmail || existingCls?.createdByTeacherEmail || '',
+      createdByTeacherId: updatedTeacherAccount?.id || existingCls?.createdByTeacherId || '',
+      createdByTeacherEmail: updatedTeacherAccount?.email || updatedTeacherAccount?.gmail || existingCls?.createdByTeacherEmail || '',
       createdAt: existingCls?.createdAt || new Date().toISOString()
     };
 
-    CloudSync.saveSchoolProfileToSchool(schoolCode, newSchool).catch(err =>
-      console.warn('Firestore school profile sync error:', err)
-    );
-    CloudSync.saveClassToSchool(schoolCode, updatedClassItem, students).catch(err => {
-      console.error('Firestore class profile sync error:', err);
-      showToast('Cloud sync warning: Check connection while saving class profile.', 'warning');
+    const nextClasses = classes.map(c => {
+      const ownsClass =
+        c.id === activeClassId ||
+        (updatedTeacherAccount?.id && (c.teacherId === updatedTeacherAccount.id || c.teacherUid === updatedTeacherAccount.id));
+      return ownsClass ? { ...c, schoolCode } : c;
     });
-    if (currentTeacher) {
-      CloudSync.saveTeacherToSchool(schoolCode, {
-        ...currentTeacher,
-        name: newTeacher.teacherName || currentTeacher.name,
-        phone: newTeacher.phone ?? currentTeacher.phone,
-        designation: newTeacher.designation || currentTeacher.designation,
-        photoUrl: newTeacher.photoUrl ?? currentTeacher.photoUrl,
-        dob: newTeacher.dob ?? currentTeacher.dob,
-        academicYear: newTeacher.academicYear ?? currentTeacher.academicYear
-      }).catch(err => console.warn('Firestore teacher profile sync error:', err));
+    StorageService.saveClassesList(nextClasses);
+    setClassesList(StorageService.getClassesList());
+
+    if (schoolCode !== prevSchoolCode) {
+      CloudSync.startRealtimeBroadcasts(schoolCode, () => refreshAllState(activeClassId));
     }
-    CloudSync.recordTeacherActivity(schoolCode, {
-      teacherId: currentTeacher?.id || 'teacher',
-      teacherName: currentTeacher?.name || newTeacher.teacherName || 'Teacher',
-      subject: currentTeacher?.subject || newTeacher.designation,
-      assignedClass: newClass.className,
-      activityType: 'profile_updated',
-      description: `Updated Class "${newClass.className}" details (${newClass.standard} ${newClass.stream} ${newClass.section}).`
-    }).catch(() => {});
+
+    // Provision / replicate full school workspace under the active schoolCode (updates /users/{uid}.schoolCode first)
+    CloudSync.provisionSchoolSpace(schoolCode, {
+      schoolProfile: normalizedSchool,
+      teacher: updatedTeacherAccount,
+      includeUserData: true,
+      reason:
+        schoolCode !== prevSchoolCode
+          ? `Migrated & replicated full school workspace from ${prevSchoolCode} to ${schoolCode}`
+          : `Updated Class "${newClass.className}" details (${newClass.standard} ${newClass.stream} ${newClass.section}).`
+    })
+      .then(() => CloudSync.saveClassToSchool(schoolCode, updatedClassItem, students))
+      .catch(err => {
+        console.error('Firestore school/class profile sync error:', err);
+        showToast('Cloud sync warning: Check connection while saving class profile.', 'warning');
+      });
+
     CloudSync.scheduleAutoSync(true);
 
-    showToast('School & Class Profile updated successfully!', 'success');
+    showToast(
+      schoolCode !== prevSchoolCode
+        ? `School profile & Firestore workspace migrated to ${schoolCode}!`
+        : 'School & Class Profile updated successfully!',
+      'success'
+    );
   };
 
   // 2. Student CRUD Handlers (Scoped to Active Class)

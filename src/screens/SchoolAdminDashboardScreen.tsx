@@ -202,7 +202,35 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   const [adminPhone, setAdminPhone] = useState(admin?.phone || '');
   const [adminEmail, setAdminEmail] = useState(admin?.email || '');
 
-  const activeSchoolCode = admin?.schoolCode || schoolProfile.schoolCode || '';
+  const [selectedSchoolCode, setSelectedSchoolCode] = useState<string>(() =>
+    CloudSync.sanitizeSchoolCode(admin?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213')
+  );
+  const [availableSchoolCodes, setAvailableSchoolCodes] = useState<string[]>(() => {
+    const initial = CloudSync.sanitizeSchoolCode(admin?.schoolCode || StorageService.getSchoolProfile().schoolCode || 'SSHSS@111213');
+    return initial === 'SSHSS@111213' ? ['SSHSS@111213'] : ['SSHSS@111213', initial];
+  });
+
+  const activeSchoolCode = CloudSync.sanitizeSchoolCode(
+    selectedSchoolCode || admin?.schoolCode || schoolProfile.schoolCode || 'SSHSS@111213'
+  );
+
+  // Discover all registered School Codes across Firestore & RTDB for Admin switcher
+  React.useEffect(() => {
+    let mounted = true;
+    CloudSync.fetchRegisteredSchoolCodes()
+      .then(codes => {
+        if (mounted && Array.isArray(codes) && codes.length > 0) {
+          setAvailableSchoolCodes(prev => {
+            const combined = Array.from(new Set([...prev, ...codes]));
+            return combined.sort((a, b) => (a === 'SSHSS@111213' ? -1 : b === 'SSHSS@111213' ? 1 : a.localeCompare(b)));
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [activeSchoolCode]);
 
   // Keep adminName in sync if admin or school profile changes
   React.useEffect(() => {
@@ -279,6 +307,23 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   React.useEffect(() => {
     if (!activeSchoolCode) return;
 
+    // Reset per-school state cleanly when switching school codes
+    setRemoteTeachers([]);
+    setRemoteClasses([]);
+    setRealtimeActivities([]);
+    setTeacherSignups([]);
+    setHasLoadedRemoteTeachers(false);
+    setSelectedTeacherIdForClassroom('');
+    setSelectedClassIdForTeacher('');
+    isInitialClassesLoadRef.current = true;
+    isInitialActivitiesLoadRef.current = true;
+    prevClassesSummaryRef.current = '';
+    latestActivityIdRef.current = null;
+    setSchoolProfile(prev => ({
+      ...prev,
+      schoolCode: activeSchoolCode
+    }));
+
     // Run one-time cleanup of old deleted teacher records
     CloudSync.cleanupOldDeletedTeachers(activeSchoolCode).catch(() => {});
 
@@ -353,7 +398,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     let unsubFsSignups = () => {};
     let unsubFsRootSignups = () => {};
 
-    const cleanSchoolCode = activeSchoolCode.trim().toUpperCase();
+    const cleanSchoolCode = CloudSync.sanitizeSchoolCode(activeSchoolCode);
 
     const mergeSignupList = (incoming: any[]) => {
       setTeacherSignups(prev => {
@@ -398,8 +443,8 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
             snapshot.forEach((d: any) => {
               const val = d.data();
               if (val) {
-                const sc = (val.schoolCode || '').trim().toUpperCase();
-                if (!sc || sc === cleanSchoolCode) {
+                const sc = CloudSync.sanitizeSchoolCode(val.schoolCode, '');
+                if (sc === cleanSchoolCode || (!sc && cleanSchoolCode === 'SSHSS@111213')) {
                   list.push({ ...val, id: d.id });
                 }
               }
@@ -421,8 +466,8 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
             snapshot.forEach(child => {
               const val = child.val();
               if (val) {
-                const sc = (val.schoolCode || '').trim().toUpperCase();
-                if (!sc || sc === cleanSchoolCode) {
+                const sc = CloudSync.sanitizeSchoolCode(val.schoolCode, '');
+                if (sc === cleanSchoolCode || (!sc && cleanSchoolCode === 'SSHSS@111213')) {
                   list.push({ ...val, id: child.key });
                 }
               }
@@ -530,26 +575,33 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       }
     };
 
-    const cleanActiveCode = activeSchoolCode.trim().toUpperCase();
+    const cleanActiveCode = CloudSync.sanitizeSchoolCode(activeSchoolCode);
 
-    // 1. Local storage teachers matching activeSchoolCode
+    // 1. Local storage teachers strictly matching activeSchoolCode
     const localTeachers = StorageService.getTeacherAccounts() || [];
     localTeachers.forEach(lt => {
-      if (lt && (!lt.schoolCode || lt.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
-        upsertTeacher(lt);
+      if (lt) {
+        const ltCode = CloudSync.sanitizeSchoolCode(lt.schoolCode, '');
+        if (ltCode === cleanActiveCode || (!ltCode && cleanActiveCode === 'SSHSS@111213')) {
+          upsertTeacher(lt);
+        }
       }
     });
 
-    // 2. Remote Firebase teachers (Firestore + RTDB)
+    // 2. Remote Firebase teachers (Firestore + RTDB) strictly matching activeSchoolCode
     (Array.isArray(remoteTeachers) ? remoteTeachers : []).forEach(rt => {
-      if (rt && (!rt.schoolCode || rt.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
-        upsertTeacher(rt);
+      if (rt) {
+        const rtCode = CloudSync.sanitizeSchoolCode(rt.schoolCode, '');
+        if (rtCode === cleanActiveCode || (!rtCode && cleanActiveCode === 'SSHSS@111213')) {
+          upsertTeacher(rt);
+        }
       }
     });
 
     // 3. Extract teacher profiles directly from synced class records if missing in teachers collection
     (Array.isArray(remoteClasses) ? remoteClasses : []).forEach(rc => {
-      if (rc && (rc.teacherName || rc.createdByTeacherEmail) && (!rc.schoolCode || rc.schoolCode.trim().toUpperCase() === cleanActiveCode)) {
+      const rcCode = rc ? CloudSync.sanitizeSchoolCode(rc.schoolCode, '') : '';
+      if (rc && (rc.teacherName || rc.createdByTeacherEmail) && (rcCode === cleanActiveCode || (!rcCode && cleanActiveCode === 'SSHSS@111213'))) {
         const tId = rc.teacherUid || rc.teacherId || rc.createdByTeacherId || rc.createdByTeacherEmail;
         const tEmail = (rc.createdByTeacherEmail || '').trim().toLowerCase();
         if (tId && !map.has(tId) && (!tEmail || !emailToMapKey.has(tEmail))) {
@@ -570,11 +622,11 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       }
     });
 
-    // 4. Add/enrich from teacherSignups matching activeSchoolCode so new signups ALWAYS show up immediately
+    // 4. Add/enrich from teacherSignups strictly matching activeSchoolCode
     (Array.isArray(teacherSignups) ? teacherSignups : []).forEach(ts => {
       if (ts) {
-        const tsCode = (ts.schoolCode || '').trim().toUpperCase();
-        if (!tsCode || tsCode === cleanActiveCode) {
+        const tsCode = CloudSync.sanitizeSchoolCode(ts.schoolCode, '');
+        if (tsCode === cleanActiveCode || (!tsCode && cleanActiveCode === 'SSHSS@111213')) {
           upsertTeacher({
             ...ts,
             id: ts.uid || ts.id,
@@ -597,16 +649,17 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   // Load all classes in school - strictly calculates classes created by the teacher(s) for entering the app + any created after entering
   const classesList = useMemo(() => {
     const rawMap = new Map<string, ClassItem>();
+    const cleanActiveCode = CloudSync.sanitizeSchoolCode(activeSchoolCode);
 
-    // 1. Collect all candidate classes for this school
+    // 1. Collect all candidate classes strictly matching activeSchoolCode
     const localClasses = StorageService.getClassesList() || [];
     localClasses.forEach(lc => {
       if (lc && lc.id) {
-        const sc = (lc.schoolCode || '').trim().toUpperCase();
-        if (!sc || sc === activeSchoolCode.trim().toUpperCase()) {
+        const sc = CloudSync.sanitizeSchoolCode(lc.schoolCode, '');
+        if (sc === cleanActiveCode || (!sc && cleanActiveCode === 'SSHSS@111213')) {
           rawMap.set(lc.id, {
             ...lc,
-            schoolCode: activeSchoolCode,
+            schoolCode: cleanActiveCode,
             status: 'active' as const
           });
         }
@@ -616,11 +669,11 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     // 2. Overlay remote Firebase classes (authoritative cloud multi-device sync)
     (Array.isArray(remoteClasses) ? remoteClasses : []).forEach(rc => {
       if (rc && rc.id) {
-        const sc = (rc.schoolCode || '').trim().toUpperCase();
-        if (!sc || sc === activeSchoolCode.trim().toUpperCase()) {
+        const sc = CloudSync.sanitizeSchoolCode(rc.schoolCode, '');
+        if (sc === cleanActiveCode || (!sc && cleanActiveCode === 'SSHSS@111213')) {
           rawMap.set(rc.id, {
             ...rc,
-            schoolCode: activeSchoolCode,
+            schoolCode: cleanActiveCode,
             status: 'active' as const
           });
         }
@@ -1048,27 +1101,45 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   // Handlers
   const handleSaveSchoolSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    const updatedProfile = {
+    const targetSchoolCode = CloudSync.sanitizeSchoolCode(schoolProfile.schoolCode || activeSchoolCode);
+    const updatedProfile: SchoolProfile = {
       ...schoolProfile,
+      schoolCode: targetSchoolCode,
       principalName: adminName.trim()
     };
     StorageService.saveSchoolProfile(updatedProfile);
     setSchoolProfile(updatedProfile);
-    await CloudSync.saveSchoolProfileToSchool(activeSchoolCode, updatedProfile);
+
+    await CloudSync.provisionSchoolSpace(targetSchoolCode, {
+      schoolProfile: updatedProfile,
+      admin: {
+        ...admin,
+        adminName: adminName.trim(),
+        phone: adminPhone,
+        email: adminEmail || admin.email,
+        schoolName: updatedProfile.schoolName,
+        schoolCode: targetSchoolCode
+      },
+      includeUserData: false,
+      reason: `School Admin provisioned & updated school settings for ${targetSchoolCode}`
+    });
+
+    setAvailableSchoolCodes(prev => Array.from(new Set([...prev, targetSchoolCode])));
+    setSelectedSchoolCode(targetSchoolCode);
 
     const admins = StorageService.getSchoolAdmins();
-    const idx = admins.findIndex(a => a.id === admin.id || a.schoolCode === admin.schoolCode);
+    const idx = admins.findIndex(a => a.id === admin.id || a.schoolCode === targetSchoolCode);
     if (idx >= 0) {
       delete admins[idx].adminPassword;
       admins[idx].adminName = adminName.trim();
       admins[idx].phone = adminPhone;
       admins[idx].email = adminEmail;
-      admins[idx].schoolName = schoolProfile.schoolName;
-      admins[idx].schoolCode = schoolProfile.schoolCode;
+      admins[idx].schoolName = updatedProfile.schoolName;
+      admins[idx].schoolCode = targetSchoolCode;
       StorageService.saveSchoolAdmins(admins);
     }
 
-    showToast('School Profile updated successfully!');
+    showToast(`School Profile & Firestore structure synced under ${targetSchoolCode}!`);
     triggerRefresh();
   };
 
@@ -1081,7 +1152,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
 
     const newBroadcast: PrincipalBroadcast = {
       id: `pb-${Date.now()}`,
-      schoolCode: admin.schoolCode || schoolProfile.schoolCode,
+      schoolCode: activeSchoolCode,
       senderName: `${adminName} (Principal)`,
       title: broadcastTitle.trim(),
       message: broadcastMessage.trim(),
@@ -1142,7 +1213,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     
     const bdayBroadcast: PrincipalBroadcast = {
       id: `bday-${Date.now()}`,
-      schoolCode: admin.schoolCode,
+      schoolCode: activeSchoolCode,
       senderName: `${adminName} (Principal)`,
       title: `🎂 Birthday Wishes to ${teacher.name}!`,
       message: greetingMessage,
@@ -1159,7 +1230,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       await CloudSync.saveBroadcastToSchool(activeSchoolCode, bdayBroadcast);
 
       sendSchoolNotification({
-        schoolCode: admin.schoolCode,
+        schoolCode: activeSchoolCode,
         title: `🎂 Birthday Wishes to ${teacher.name}!`,
         body: greetingMessage,
         category: 'messages',
@@ -1191,7 +1262,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
 
   const handleClearTeacherActivity = async () => {
     if (confirm('Are you sure you want to permanently clear all recent teacher activity records?')) {
-      const success = await CloudSync.clearSchoolActivities(admin.schoolCode);
+      const success = await CloudSync.clearSchoolActivities(activeSchoolCode);
       if (success) {
         setRealtimeActivities([]);
         showToast('All teacher activities have been permanently deleted.');
@@ -1202,11 +1273,11 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
   };
 
   const handleExportFullJson = () => {
-    const jsonStr = StorageService.exportCompleteSchoolData(admin.schoolCode);
+    const jsonStr = StorageService.exportCompleteSchoolData(activeSchoolCode);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const filename = `School_Admin_Backup_${admin.schoolCode}_${new Date().toISOString().split('T')[0]}.json`;
+    const filename = `School_Admin_Backup_${activeSchoolCode}_${new Date().toISOString().split('T')[0]}.json`;
     link.href = url;
     link.download = filename;
     document.body.appendChild(link);
@@ -1247,7 +1318,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
             overallAcademicAverage: crossClassData.overallAcademicAverage
           }
         );
-        const filename = `Consolidated_School_Audit_${admin.schoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
+        const filename = `Consolidated_School_Audit_${activeSchoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
         await shareOrDownloadPDF(doc, filename, 'School Audit Report');
         showToast(`Consolidated Audit PDF downloaded (${filename})!`);
       } catch (e) {
@@ -1271,7 +1342,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
           admin,
           crossClassData.allStudentsList
         );
-        const filename = `Students_Roster_${admin.schoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
+        const filename = `Students_Roster_${activeSchoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
         await shareOrDownloadPDF(doc, filename, 'School Students Roster');
         showToast(`Students Roster PDF downloaded (${filename})!`);
       } catch (e) {
@@ -1295,7 +1366,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
           admin,
           teachers
         );
-        const filename = `Teacher_Directory_${admin.schoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
+        const filename = `Teacher_Directory_${activeSchoolCode || 'SSHSS'}_${new Date().toISOString().split('T')[0]}.pdf`;
         await shareOrDownloadPDF(doc, filename, 'Teacher Directory');
         showToast(`Teacher Directory PDF downloaded (${filename})!`);
       } catch (e) {
@@ -1324,7 +1395,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `School_Students_Consolidated_${admin.schoolCode}.csv`;
+    link.download = `School_Students_Consolidated_${activeSchoolCode}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1344,7 +1415,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
       t.dob || '-',
       t.phone,
       `"${t.schoolName || schoolProfile.schoolName || admin.schoolName}"`,
-      t.schoolCode || admin.schoolCode
+      t.schoolCode || activeSchoolCode
     ]);
 
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -1352,7 +1423,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Teacher_Directory_${admin.schoolCode}.csv`;
+    link.download = `Teacher_Directory_${activeSchoolCode}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1432,14 +1503,13 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
         lastActiveAt: new Date().toISOString()
       };
       StorageService.updateTeacherAccount(updated);
-      await CloudSync.saveTeacherToSchool(admin.schoolCode || 'SSHSS@111213', updated);
+      await CloudSync.saveTeacherToSchool(activeSchoolCode, updated);
 
       if (database) {
-        const cleanSchoolCode = (admin.schoolCode || 'SSHSS@111213').trim().toUpperCase();
         const tKey = (updated.uid || updated.id || '').trim();
         if (tKey) {
           update(ref(database, `teachers/${tKey}`), { academicYear: effectiveYear }).catch(() => {});
-          update(ref(database, `schools/${cleanSchoolCode}/teachers/${tKey}`), { academicYear: effectiveYear }).catch(() => {});
+          update(ref(database, `schools/${activeSchoolCode}/teachers/${tKey}`), { academicYear: effectiveYear }).catch(() => {});
         }
       }
 
@@ -1463,7 +1533,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
         section: teacherFormData.section,
         phone: teacherFormData.phone.trim(),
         schoolName: schoolProfile.schoolName || admin.schoolName || "St. Sebastian's Higher Secondary School",
-        schoolCode: admin.schoolCode || 'SSHSS@111213',
+        schoolCode: activeSchoolCode,
         dob: teacherFormData.dob || undefined,
         avatar: teacherFormData.avatar || '👨‍🏫',
         photoUrl: teacherFormData.photoUrl || undefined,
@@ -1471,15 +1541,29 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
         lastActiveAt: new Date().toISOString()
       };
       StorageService.addTeacherAccount(newTeach);
-      await CloudSync.saveTeacherToSchool(admin.schoolCode || 'SSHSS@111213', newTeach);
-
-      if (database) {
-        const cleanSchoolCode = (admin.schoolCode || 'SSHSS@111213').trim().toUpperCase();
-        update(ref(database, `teachers/${newId}`), { academicYear: effectiveYear }).catch(() => {});
-        update(ref(database, `schools/${cleanSchoolCode}/teachers/${newId}`), { academicYear: effectiveYear }).catch(() => {});
+      await CloudSync.saveTeacherToSchool(activeSchoolCode, newTeach);
+      if (cleanEmail) {
+        CloudSync.recordGmailEntry(cleanEmail, {
+          role: 'teacher',
+          name: newTeach.name,
+          schoolCode: activeSchoolCode,
+          schoolName: newTeach.schoolName,
+          dob: newTeach.dob || '',
+          teacherId: newId,
+          uid: newId,
+          phone: newTeach.phone,
+          subject: newTeach.subject,
+          assignedClass: newTeach.assignedClass,
+          designation: newTeach.designation
+        }).catch(() => {});
       }
 
-      showToast(`New teacher ${newTeach.name} registered under school ${admin.schoolCode || 'SSHSS@111213'}!`);
+      if (database) {
+        update(ref(database, `teachers/${newId}`), { academicYear: effectiveYear }).catch(() => {});
+        update(ref(database, `schools/${activeSchoolCode}/teachers/${newId}`), { academicYear: effectiveYear }).catch(() => {});
+      }
+
+      showToast(`New teacher ${newTeach.name} registered under school ${activeSchoolCode}!`);
     }
     setIsTeacherModalOpen(false);
     setActiveTab('teachers-info');
@@ -1505,7 +1589,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
           photoUrl: uploaded.downloadUrl
         };
         StorageService.updateTeacherAccount(updatedTeacher);
-        await CloudSync.saveTeacherToSchool(admin.schoolCode, updatedTeacher);
+        await CloudSync.saveTeacherToSchool(activeSchoolCode, updatedTeacher);
         showToast(`Profile photo uploaded and synced for ${teacher.name}!`);
         triggerRefresh();
         return;
@@ -1523,7 +1607,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
           photoUrl: base64
         };
         StorageService.updateTeacherAccount(updatedTeacher);
-        CloudSync.saveTeacherToSchool(admin.schoolCode, updatedTeacher).catch(() => {});
+        CloudSync.saveTeacherToSchool(activeSchoolCode, updatedTeacher).catch(() => {});
         showToast(`Profile photo updated for ${teacher.name}!`);
         triggerRefresh();
       }
@@ -1777,14 +1861,25 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
               />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-extrabold uppercase tracking-widest text-amber-400 bg-amber-500/15 px-2.5 py-0.5 rounded-md border border-amber-500/30">
                   School Admin Portal
                 </span>
-                <span className="text-xs font-mono font-bold text-slate-300 bg-[#0F1115] px-2 py-0.5 rounded-md border border-[#2D3139] flex items-center gap-1">
-                  <Hash className="w-3 h-3 text-amber-400" />
-                  {activeSchoolCode}
-                </span>
+                <label className="text-xs font-mono font-bold text-slate-300 bg-[#0F1115] px-2 py-0.5 rounded-md border border-[#2D3139] flex items-center gap-1" title="Switch School Code Workspace">
+                  <Hash className="w-3 h-3 text-amber-400 shrink-0" />
+                  <select
+                    aria-label="Active School Code"
+                    value={activeSchoolCode}
+                    onChange={e => setSelectedSchoolCode(CloudSync.sanitizeSchoolCode(e.target.value))}
+                    className="bg-transparent text-xs font-mono font-bold text-slate-200 focus:outline-none cursor-pointer pr-1"
+                  >
+                    {Array.from(new Set([activeSchoolCode, ...availableSchoolCodes])).map(code => (
+                      <option key={code} value={code} className="bg-[#0F1115] text-slate-100">
+                        {code}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
               <h1 className="text-base sm:text-lg font-black text-white truncate max-w-sm sm:max-w-xl">
                 {schoolProfile.schoolName || admin.schoolName}
@@ -4985,7 +5080,7 @@ export const SchoolAdminDashboardScreen: React.FC<SchoolAdminDashboardScreenProp
                       Teacher Work Dossier
                     </span>
                     <span className="text-xs font-mono font-bold text-amber-400">
-                      {selectedTeacherForDossier.schoolCode || admin.schoolCode}
+                      {selectedTeacherForDossier.schoolCode || activeSchoolCode}
                     </span>
                   </div>
                   <h3 className="text-xl font-black text-white mt-0.5">{selectedTeacherForDossier.name}</h3>

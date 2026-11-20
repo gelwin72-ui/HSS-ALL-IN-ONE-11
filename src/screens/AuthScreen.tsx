@@ -151,7 +151,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       const accounts = StorageService.getTeacherAccounts();
       let activeTeacher = accounts.find(a => (a.email || '').toLowerCase() === cleanEmail);
       const currentSchool = StorageService.getSchoolProfile();
-      const gCode = (activeTeacher?.schoolCode || currentSchool.schoolCode || 'SSHSS@111213').trim().toUpperCase();
+      const gCode = CloudSync.sanitizeSchoolCode(activeTeacher?.schoolCode || currentSchool.schoolCode);
 
       const isPermDeleted = await CloudSync.isTeacherPermanentlyDeletedForSchool(gCode, user.uid, cleanEmail);
       if (isPermDeleted) {
@@ -202,6 +202,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       };
       StorageService.saveTeacherInfo(updatedTeacher);
 
+      StorageService.saveSchoolProfile({
+        ...currentSchool,
+        schoolName: sanitizedTeacher.schoolName || currentSchool.schoolName,
+        schoolCode: gCode
+      });
+
       StorageService.setAuthSession({
         isLoggedIn: true,
         role: 'teacher',
@@ -238,12 +244,23 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         dob: sanitizedTeacher.dob,
         teacherId: user.uid,
         uid: user.uid,
+        phone: sanitizedTeacher.phone,
+        subject: sanitizedTeacher.subject || sanitizedTeacher.primarySubject,
+        assignedClass: sanitizedTeacher.assignedClass,
+        designation: sanitizedTeacher.designation,
         loginMethod: 'google'
       });
 
       CloudSync.setActiveSyncEmail(cleanEmail);
       await CloudSync.pushToCloud(user);
       CloudSync.startRealtimeSync(user);
+
+      CloudSync.provisionSchoolSpace(gCode, {
+        schoolProfile: StorageService.getSchoolProfile(),
+        teacher: sanitizedTeacher,
+        includeUserData: true,
+        reason: `Teacher ${sanitizedTeacher.name} signed in via Google Auth (${gCode})`
+      }).catch(() => {});
 
       CloudSync.recordTeacherActivity(gCode, {
         teacherId: user.uid,
@@ -309,7 +326,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
     const effectiveStandard = signupStandard === 'Other' ? (customStandard.trim() || 'Class 12') : signupStandard;
     const effectiveStream = signupStream === 'Other' ? (customStream.trim() || 'General') : signupStream;
     const assignedClassName = `${effectiveStandard} ${effectiveStream} ${signupSection}`.trim();
-    const cleanSchoolCode = (signupSchoolCode.trim() || 'SSHSS@111213').toUpperCase();
+    const cleanSchoolCode = CloudSync.sanitizeSchoolCode(signupSchoolCode);
     const cleanSchoolName = signupSchool.trim() || "St. Sebastian's Higher Secondary School";
     const nowIso = new Date().toISOString();
 
@@ -481,7 +498,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       CloudSync.setActiveSyncEmail(cleanEmail);
       CloudSync.startRealtimeSync(authUser);
 
-      // Run full profile/backup sync and logs in background for instant dashboard entry
+      // Run full profile/school-space replication, Gmail directory record & backup in background for instant dashboard entry
       CloudSync.recordGmailEntry(cleanEmail, {
         role: 'teacher',
         name: newAccount.name,
@@ -494,7 +511,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         uid: firebaseUid,
         phone: signupPhone.trim(),
         subject: effectiveSubject,
-        assignedClass: assignedClassName
+        assignedClass: assignedClassName,
+        designation: newAccount.designation
+      }).catch(() => {});
+      CloudSync.provisionSchoolSpace(cleanSchoolCode, {
+        schoolProfile: {
+          ...currentSchool,
+          schoolName: cleanSchoolName,
+          schoolCode: cleanSchoolCode
+        },
+        teacher: newAccount,
+        includeUserData: true,
+        reason: `Teacher ${newAccount.name} created account under ${cleanSchoolCode}`
       }).catch(() => {});
       CloudSync.pushToCloud(authUser).catch(() => {});
 
@@ -564,7 +592,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
     setSuccessMsg(null);
 
     const cleanQuery = loginEmailOrPhone.trim().toLowerCase();
-    const cleanSchoolCode = (loginSchoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const enteredSchoolCode = loginSchoolCode.trim() ? CloudSync.sanitizeSchoolCode(loginSchoolCode, '') : '';
     const normalizeDob = (d?: string) => (d || '').trim().replace(/[/\s.-]/g, '');
 
     if (!cleanQuery) {
@@ -605,20 +633,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       }
       const realUid = authUser.uid;
 
-      const isPermDeleted = await CloudSync.isTeacherPermanentlyDeletedForSchool(cleanSchoolCode, realUid, resolvedEmail);
-      if (isPermDeleted) {
-        await signOut(auth).catch(() => {});
-        setErrorMsg('Access Denied: Your teacher account has been permanently removed from this school.');
-        return;
-      }
-
       setLoadingText('Loading your Firestore classroom profile...');
       await CloudSync.fetchFromCloud(authUser);
 
       const [credResult, cloudFull, restored] = await Promise.all([
-        CloudSync.fetchTeacherCredential(resolvedEmail, cleanSchoolCode).catch(() => null),
-        CloudSync.fetchCompleteUserCloudData(realUid, resolvedEmail, cleanSchoolCode).catch(() => null),
-        CloudSync.restoreTeacherClassroom(realUid, resolvedEmail, cleanSchoolCode).catch(() => null)
+        CloudSync.fetchTeacherCredential(resolvedEmail, enteredSchoolCode).catch(() => null),
+        CloudSync.fetchCompleteUserCloudData(realUid, resolvedEmail, enteredSchoolCode).catch(() => null),
+        CloudSync.restoreTeacherClassroom(realUid, resolvedEmail, enteredSchoolCode).catch(() => null)
       ]);
 
       if (credResult && (credResult as any).found && (credResult as any).reason === 'status_inactive') {
@@ -634,6 +655,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         hydratedAccounts.find(a => a.id === realUid || (a.email || '').toLowerCase() === resolvedEmail) ||
         localCandidate ||
         null;
+
+      const cleanSchoolCode = CloudSync.sanitizeSchoolCode(
+        enteredSchoolCode ||
+        match?.schoolCode ||
+        StorageService.getSchoolProfile().schoolCode
+      );
+
+      const isPermDeleted = await CloudSync.isTeacherPermanentlyDeletedForSchool(cleanSchoolCode, realUid, resolvedEmail);
+      if (isPermDeleted) {
+        await signOut(auth).catch(() => {});
+        setErrorMsg('Access Denied: Your teacher account has been permanently removed from this school.');
+        return;
+      }
 
       if (!match) {
         match = {
@@ -702,6 +736,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       StorageService.saveTeacherAccounts(allAccounts);
       StorageService.updateTeacherLastActive(match.id);
 
+      const currentSchoolProfile = StorageService.getSchoolProfile();
+      StorageService.saveSchoolProfile({
+        ...currentSchoolProfile,
+        schoolName: match.schoolName || currentSchoolProfile.schoolName,
+        schoolCode: cleanSchoolCode
+      });
+
       StorageService.saveTeacherInfo({
         teacherName: match.name,
         email: resolvedEmail,
@@ -749,7 +790,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
           uid: realUid,
           phone: match.phone,
           subject: match.subject || match.primarySubject,
-          assignedClass: match.assignedClass
+          assignedClass: match.assignedClass,
+          designation: match.designation
+        }),
+        CloudSync.provisionSchoolSpace(cleanSchoolCode, {
+          schoolProfile: StorageService.getSchoolProfile(),
+          teacher: match,
+          includeUserData: true,
+          reason: `Teacher ${match.name} logged in under ${cleanSchoolCode}`
         }),
         CloudSync.pushToCloud(authUser)
       ]).catch(() => {});
@@ -763,7 +811,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         subject: match.subject || match.primarySubject || match.designation,
         assignedClass: match.assignedClass,
         activityType: 'login',
-        description: `Teacher ${match.name} logged into School Portal`
+        description: `Teacher ${match.name} logged into School Portal (${cleanSchoolCode})`
       }).catch(() => {});
 
       CloudSync.recordLoginActivity(cleanSchoolCode, {
@@ -771,7 +819,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         accessMethod: 'Teacher Login',
         role: 'teacher',
         success: true,
-        details: `Teacher logged in successfully via Firebase Auth: ${resolvedEmail}`
+        details: `Teacher logged in successfully via Firebase Auth: ${resolvedEmail} (${cleanSchoolCode})`
       }).catch(() => {});
 
       setSuccessMsg(`Welcome back, ${match.name}!`);
@@ -802,7 +850,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
     setSuccessMsg(null);
 
     const cleanGmail = adminGmail.trim().toLowerCase();
-    const cleanSchoolCode = adminSchoolCode.trim().toUpperCase();
+    const cleanSchoolCode = CloudSync.sanitizeSchoolCode(adminSchoolCode, '');
 
     if (!cleanGmail || !cleanGmail.includes('@')) {
       setErrorMsg('Please enter a valid School Gmail address.');
@@ -915,16 +963,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         cleanGmail,
         cleanSchoolCode,
         adminDesignation
-      ).catch(() => {});
-
-      CloudSync.recordGmailEntry(cleanGmail, {
-        role: 'admin',
-        name: adminAccount.adminName,
-        schoolCode: cleanSchoolCode,
-        schoolName: adminAccount.schoolName,
-        loginMethod: 'email',
-        designation: adminDesignation || 'Head of School',
-        uid: authUid
+      ).then(() => {
+        CloudSync.recordGmailEntry(cleanGmail, {
+          role: 'admin',
+          name: adminAccount.adminName,
+          schoolCode: cleanSchoolCode,
+          schoolName: adminAccount.schoolName,
+          loginMethod: 'email',
+          designation: adminDesignation || 'Head of School',
+          uid: authUid
+        }).catch(() => {});
+        CloudSync.provisionSchoolSpace(cleanSchoolCode, {
+          admin: adminAccount,
+          schoolProfile: StorageService.getSchoolProfile(),
+          includeUserData: false,
+          reason: `Admin ${adminAccount.adminName} initialized school portal (${cleanSchoolCode})`
+        }).catch(() => {});
       }).catch(() => {});
 
       CloudSync.pushToCloud(authUser).catch(() => {});

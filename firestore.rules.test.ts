@@ -21,7 +21,7 @@ describe('Firestore Security Rules & Dirty Dozen Verification', () => {
 
   it('protects all 35 Firestore paths declared in firebase-blueprint.json', () => {
     const blueprintPaths = Object.keys(blueprint.firestore || {});
-    expect(blueprintPaths.length).toBeGreaterThanOrEqual(34);
+    expect(blueprintPaths.length).toBeGreaterThanOrEqual(35);
 
     // Every top-level & subcollection segment from blueprint must appear in firestore.rules
     const requiredMatches = [
@@ -44,6 +44,7 @@ describe('Firestore Security Rules & Dirty Dozen Verification', () => {
       'match /schoolAdmins/{adminId}',
       'match /teachers/{teacherId}',
       'match /teacherSignups/{teacherId}',
+      'match /gmail/{emailKey}',
       'match /classes/{classId}',
       'match /students/{studentId}',
       'match /attendance/{attendanceId}',
@@ -64,6 +65,7 @@ describe('Firestore Security Rules & Dirty Dozen Verification', () => {
     for (const segment of requiredMatches) {
       expect(rulesContent).toContain(segment);
     }
+    expect(blueprintPaths).toContain('/schools/{schoolCode}/gmail/{emailKey}');
   });
 
   it('Dirty Dozen #1 & #2: Blocks unauthenticated reads and cross-user profile hijacks', () => {

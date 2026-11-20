@@ -18,7 +18,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { SchoolProfile, ClassInfo, TeacherInfo } from '../types';
-import { auth, uploadFileToFirebaseStorage } from '../utils/firebase';
+import { auth, sanitizeSchoolCode, uploadFileToFirebaseStorage } from '../utils/firebase';
 
 interface SchoolProfileScreenProps {
   school: SchoolProfile;
@@ -45,7 +45,12 @@ export const SchoolProfileScreen: React.FC<SchoolProfileScreenProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveProfile(formDataSchool, formDataClass, formDataTeacher);
+    const cleanSchool: SchoolProfile = {
+      ...formDataSchool,
+      schoolCode: sanitizeSchoolCode(formDataSchool.schoolCode || school.schoolCode)
+    };
+    setFormDataSchool(cleanSchool);
+    onSaveProfile(cleanSchool, formDataClass, formDataTeacher);
     setIsEditing(false);
     setIsSaved(true);
     setTimeout(() => setIsSaved(false), 3000);
@@ -171,9 +176,12 @@ export const SchoolProfileScreen: React.FC<SchoolProfileScreenProps> = ({
                 disabled={!isEditing}
                 value={formDataSchool.schoolCode}
                 onChange={e => setFormDataSchool({ ...formDataSchool, schoolCode: e.target.value })}
-                className="w-full px-4 py-2.5 rounded-xl bg-[#0F1115] border border-[#2D3139] disabled:bg-[#0F1115]/50 disabled:border-[#2D3139] text-sm text-white focus:outline-none focus:border-purple-500 transition"
+                className="w-full px-4 py-2.5 rounded-xl bg-[#0F1115] border border-[#2D3139] disabled:bg-[#0F1115]/50 disabled:border-[#2D3139] text-sm text-white font-mono uppercase focus:outline-none focus:border-purple-500 transition"
                 placeholder="Enter your school code"
               />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Firestore workspace & classes are partitioned by this School Code.
+              </p>
             </div>
 
             <div>

@@ -512,8 +512,16 @@ export async function deleteCloudStorageFile(storagePath: string, fileId?: strin
   }
 }
 
+export function sanitizeSchoolCode(schoolCode?: string, fallback: string = 'SSHSS@111213'): string {
+  const raw = (schoolCode || '').trim().toUpperCase();
+  if (!raw) return fallback;
+  const cleaned = raw.replace(/\s+/g, '_').replace(/[^A-Z0-9_\-.@]/g, '_').slice(0, 64);
+  return cleaned || fallback;
+}
+
 /**
- * Saves entered Gmail, DOB, UID, and schoolCode in Firestore (`gmail/${safeKey}` and `teacher_credentials/${safeKey}`)
+ * Saves entered Gmail, DOB, UID, schoolCode, and auth metadata in Firestore
+ * (`gmail/${safeKey}`, `teacher_credentials/${safeKey}`, and `schools/${cleanCode}/gmail/${safeKey}`)
  * strictly WITHOUT storing plaintext passwords (all passwords reside securely in Firebase Auth).
  */
 export const storeCredentialsInRTDB = async (
@@ -522,7 +530,8 @@ export const storeCredentialsInRTDB = async (
   dob?: string,
   schoolCode?: string,
   name?: string,
-  uid?: string
+  uid?: string,
+  authProvider: string = 'email_password'
 ): Promise<void> => {
   if (!gmail) return;
   const currentUser = auth?.currentUser;
@@ -531,28 +540,37 @@ export const storeCredentialsInRTDB = async (
 
   const cleanEmail = gmail.trim().toLowerCase();
   if (!cleanEmail.includes('@')) return;
-  const safeKey = cleanEmail.replace(/[.#$[\]/]/g, '_');
+  const safeKey = cleanEmail.replace(/[^a-z0-9_]/g, '_');
+  const cleanCode = sanitizeSchoolCode(schoolCode);
   const now = new Date().toISOString();
   const payload: Record<string, any> = {
     uid: resolvedUid,
+    teacherId: resolvedUid,
     gmail: cleanEmail,
     email: cleanEmail,
-    schoolCode: (schoolCode || 'SSHSS@111213').trim().toUpperCase(),
+    schoolCode: cleanCode,
     role: 'teacher',
+    loginMethod: authProvider === 'google' ? 'google' : 'email',
+    authProvider,
+    passwordProtected: true,
+    credentialStatus: 'Firebase Auth Protected',
     lastEntryAt: now,
     updatedAt: now
   };
   if (dob !== undefined && dob !== '') {
-    payload.dob = dob;
-    payload.dateOfBirth = dob;
+    payload.dob = String(dob).slice(0, 32);
+    payload.dateOfBirth = String(dob).slice(0, 32);
   }
   if (name) {
-    payload.name = name.trim();
+    payload.name = name.trim().slice(0, 150);
   }
 
   if (database) {
     try {
-      await update(ref(database, `gmail/${safeKey}`), payload);
+      await Promise.allSettled([
+        update(ref(database, `gmail/${safeKey}`), payload),
+        update(ref(database, `schools/${cleanCode}/gmail/${safeKey}`), payload)
+      ]);
     } catch (e) {
       console.warn('RTDB gmail directory sync note:', e);
     }
@@ -560,7 +578,10 @@ export const storeCredentialsInRTDB = async (
   if (firestore) {
     try {
       await fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true });
-      await fsSetDoc(fsDoc(firestore, 'teacher_credentials', safeKey), payload, { merge: true });
+      await Promise.allSettled([
+        fsSetDoc(fsDoc(firestore, 'teacher_credentials', safeKey), payload, { merge: true }),
+        fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/gmail/${safeKey}`), payload, { merge: true })
+      ]);
     } catch (e) {
       handleFirestoreError(e, OperationType.WRITE, `gmail/${safeKey}`);
     }

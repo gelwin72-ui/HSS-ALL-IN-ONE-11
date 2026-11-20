@@ -25,7 +25,8 @@ import {
   fsWriteBatch,
   testFirestoreConnection,
   handleFirestoreError,
-  OperationType
+  OperationType,
+  sanitizeSchoolCode as sanitizeSchoolCodeUtil
 } from './firebase';
 import {
   SchoolProfile,
@@ -277,6 +278,10 @@ class CloudSyncManager {
 
   public sanitizeEmailKey(email: string): string {
     return (email || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  }
+
+  public sanitizeSchoolCode(schoolCode?: string, fallback: string = 'SSHSS@111213'): string {
+    return sanitizeSchoolCodeUtil(schoolCode, fallback);
   }
 
   public getStatus(): SyncStatus {
@@ -1015,8 +1020,13 @@ class CloudSyncManager {
       this.notify('syncing');
 
       const promises: Promise<any>[] = [];
-      const schoolCode = (bundle.schoolProfile.schoolCode || 'SSHSS@111213').trim().toUpperCase();
-      const activeSession = StorageService.getAuthSession();
+      const rawSession = StorageService.getAuthSession();
+      const rawSessionSchoolCode =
+        rawSession.currentTeacher?.schoolCode ||
+        rawSession.currentAdmin?.schoolCode ||
+        bundle.schoolProfile.schoolCode;
+      const schoolCode = this.sanitizeSchoolCode(bundle.schoolProfile.schoolCode || rawSessionSchoolCode);
+      const activeSession = rawSession;
       const sanitizedSessionTeacher = this.sanitizeForFirestore(activeSession.currentTeacher);
       const sanitizedSessionAdmin = this.sanitizeForFirestore(activeSession.currentAdmin);
       const nowIso = new Date().toISOString();
@@ -1204,7 +1214,8 @@ class CloudSyncManager {
               if (s && s.id) {
                 const studentPayload = this.sanitizeStudentPayload(s, cls.id, schoolCode, currentUser.uid);
                 promises.push(
-                  fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/classes/${cls.id}/students/${s.id}`), studentPayload, { merge: true }).catch(e => console.warn('Firestore class student sync note:', e))
+                  fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/classes/${cls.id}/students/${s.id}`), studentPayload, { merge: true }).catch(e => console.warn('Firestore class student sync note:', e)),
+                  fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/students/${s.id}`), studentPayload, { merge: true }).catch(e => console.warn('Firestore school student sync note:', e))
                 );
               }
             }
@@ -1247,9 +1258,16 @@ class CloudSyncManager {
         }
       }
 
-      // 4. Sync school profile, timetables, timetable preferences, and reminders to Firestore
+      // 4. Sync school root, school profile, timetables, timetable preferences, and reminders to Firestore
       if (currentUser && schoolCode && firestore) {
         const sp = bundle.schoolProfile;
+        promises.push(
+          fsSetDoc(fsDoc(firestore, `schools/${schoolCode}`), {
+            schoolCode,
+            schoolName: sp.schoolName || "St. Sebastian's Higher Secondary School",
+            updatedAt: nowIso
+          }, { merge: true }).catch(e => console.warn('Firestore schools root sync note:', e))
+        );
         const cleanSchoolProfile: Record<string, any> = {
           schoolName: sp.schoolName || "St. Sebastian's Higher Secondary School",
           schoolCode,
@@ -1337,6 +1355,48 @@ class CloudSyncManager {
 
           promises.push(
             fsSetDoc(emailDocRef, emailPayload, { merge: true }).catch(e => console.warn('Firestore email_accounts note:', e))
+          );
+
+          // Keep /gmail/{emailKey} and /schools/{schoolCode}/gmail/{emailKey} continuously updated
+          const authProvider = currentUser.providerData?.some(p => p.providerId === 'google.com')
+            ? 'google'
+            : 'email_password';
+          const dirPayload: Record<string, any> = {
+            uid: currentUser.uid,
+            teacherId: currentUser.uid,
+            gmail: syncEmail,
+            email: syncEmail,
+            role: activeSession.role === 'admin' ? 'admin' : 'teacher',
+            name: (matchedTeacher?.name || matchedAdmin?.adminName || bundle.teacherInfo.teacherName || currentUser.displayName || 'Teacher').slice(0, 150),
+            schoolCode,
+            schoolName: String(bundle.schoolProfile.schoolName || matchedTeacher?.schoolName || matchedAdmin?.schoolName || '').slice(0, 200),
+            loginMethod: authProvider === 'google' ? 'google' : 'email',
+            authProvider,
+            passwordProtected: true,
+            credentialStatus: authProvider === 'google' ? 'Google OAuth Protected' : 'Firebase Auth Protected',
+            lastEntryAt: nowIso,
+            updatedAt: nowIso
+          };
+          const dobVal = matchedTeacher?.dob || matchedAdmin?.dob || '';
+          if (dobVal) {
+            dirPayload.dob = String(dobVal).slice(0, 32);
+            dirPayload.dateOfBirth = String(dobVal).slice(0, 32);
+          }
+          if (matchedTeacher?.phone || bundle.teacherInfo.phone) {
+            dirPayload.phone = String(matchedTeacher?.phone || bundle.teacherInfo.phone).slice(0, 40);
+          }
+          if (matchedTeacher?.subject || matchedTeacher?.primarySubject) {
+            dirPayload.subject = String(matchedTeacher?.subject || matchedTeacher?.primarySubject).slice(0, 100);
+          }
+          if (matchedTeacher?.assignedClass || bundle.classInfo.className) {
+            dirPayload.assignedClass = String(matchedTeacher?.assignedClass || bundle.classInfo.className).slice(0, 150);
+          }
+          if (matchedTeacher?.designation || matchedAdmin?.designation || bundle.teacherInfo.designation) {
+            dirPayload.designation = String(matchedTeacher?.designation || matchedAdmin?.designation || bundle.teacherInfo.designation).slice(0, 100);
+          }
+          promises.push(
+            fsSetDoc(fsDoc(firestore, 'gmail', emailKey), dirPayload, { merge: true }).catch(() => {}),
+            fsSetDoc(fsDoc(firestore, `schools/${schoolCode}/gmail/${emailKey}`), dirPayload, { merge: true }).catch(() => {})
           );
         }
       }
@@ -2102,7 +2162,7 @@ class CloudSyncManager {
 
   public startRealtimeBroadcasts(schoolCode: string, onBroadcastsUpdated?: () => void) {
     if (!schoolCode) return;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     if (this.unsubscribeBroadcastsSnapshot) {
       try {
@@ -2190,7 +2250,7 @@ class CloudSyncManager {
 
   public async saveTeacherToSchool(schoolCode: string, teacher: TeacherAccount): Promise<boolean> {
     if (!schoolCode || !teacher) return false;
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanGmail = (teacher.gmail || teacher.email || '').trim().toLowerCase();
     const effectiveTeacherKey = (teacher.uid || teacher.id || auth?.currentUser?.uid || '').trim();
 
@@ -2344,7 +2404,7 @@ class CloudSyncManager {
     teacherUid?: string
   ): Promise<boolean> {
     if (!schoolCode || !teacherId) return false;
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanEmail = (teacherEmail || '').trim().toLowerCase();
 
     // Track temporary delete in local storage
@@ -2450,7 +2510,7 @@ class CloudSyncManager {
     uid?: string,
     email?: string
   ): Promise<boolean> {
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanEmail = (email || '').trim().toLowerCase();
     const cleanUid = (uid || '').trim();
 
@@ -2511,7 +2571,7 @@ class CloudSyncManager {
   public async isEmailAuthorizedAdmin(schoolCode: string, email: string): Promise<boolean> {
     if (!email) return false;
     const cleanEmail = email.trim().toLowerCase();
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     const PRE_AUTHORIZED = new Set([
       'gelwin72@gmail.com',
@@ -2544,7 +2604,7 @@ class CloudSyncManager {
     teacherUid?: string
   ): Promise<boolean> {
     if (!schoolCode || !teacherId) return false;
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanEmail = (teacherEmail || '').trim().toLowerCase();
     const sanitizedEmail = cleanEmail ? this.sanitizeEmailKey(cleanEmail) : '';
     const effectiveUid = teacherUid || teacherId;
@@ -2639,7 +2699,7 @@ class CloudSyncManager {
 
   public async cleanupOldDeletedTeachers(schoolCode: string): Promise<void> {
     if (!schoolCode) return;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     try {
       let permDeletedIds: string[] = [];
@@ -2688,7 +2748,7 @@ class CloudSyncManager {
 
   public async saveClassToSchool(schoolCode: string, classItem: ClassItem, students?: Student[]): Promise<boolean> {
     if (!schoolCode || !classItem || !classItem.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const uid = auth?.currentUser?.uid || classItem.teacherUid || classItem.teacherId || '';
     const nowIso = new Date().toISOString();
 
@@ -2751,7 +2811,7 @@ class CloudSyncManager {
 
   public async syncAllTeacherClassesToSchool(schoolCode: string, teacherId?: string, teacherEmail?: string): Promise<void> {
     if (!schoolCode) return;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const localClasses = StorageService.getClassesList();
     const cleanEmail = (teacherEmail || '').trim().toLowerCase();
 
@@ -2781,7 +2841,7 @@ class CloudSyncManager {
 
   public async deleteClassFromSchool(schoolCode: string, classId: string): Promise<boolean> {
     if (!schoolCode || !classId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     if (database) {
       try {
@@ -2810,7 +2870,7 @@ class CloudSyncManager {
     onClassesUpdated: (classes: ClassItem[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     let unsubFs: (() => void) | null = null;
     if (firestore) {
@@ -2885,7 +2945,7 @@ class CloudSyncManager {
   }> {
     const cleanUid = (uid || '').trim();
     const cleanEmail = (email || '').trim().toLowerCase();
-    const cleanSchool = (schoolCode || '').trim().toUpperCase();
+    const cleanSchool = schoolCode ? this.sanitizeSchoolCode(schoolCode, '') : '';
 
     if (!cleanUid && !cleanEmail) {
       return { found: false };
@@ -3164,7 +3224,7 @@ class CloudSyncManager {
   }> {
     const cleanUid = (teacherUid || '').trim();
     const cleanEmail = (teacherEmail || '').trim().toLowerCase();
-    const cleanSchool = (schoolCode || '').trim().toUpperCase();
+    const cleanSchool = schoolCode ? this.sanitizeSchoolCode(schoolCode, '') : '';
 
     if (!cleanUid && !cleanEmail) {
       const localClasses = StorageService.getClassesList();
@@ -3440,9 +3500,12 @@ class CloudSyncManager {
   }
 
   /**
-   * Saves entered Gmail, date of birth, UID, and schoolCode into Firebase RTDB
-   * and Firestore under 'gmail/${safeKey}' and 'teacher_credentials/${safeKey}' / 'admin_credentials/${safeKey}'
-   * (zero plaintext passwords ever stored).
+   * Saves entered Gmail, date of birth, UID, schoolCode, and credential protection status
+   * into Firebase RTDB and Firestore under:
+   *  - 'gmail/{safeKey}' (separate global Gmail directory across the entire app)
+   *  - 'schools/{cleanCode}/gmail/{safeKey}' (school-partitioned Gmail directory)
+   *  - 'teacher_credentials/{safeKey}' / 'admin_credentials/{safeKey}'
+   * Zero plaintext passwords are ever written to Firestore.
    */
   public async recordGmailEntry(
     gmail: string,
@@ -3473,44 +3536,399 @@ class CloudSyncManager {
       const safeKey = this.sanitizeEmailKey(cleanEmail);
       const now = new Date().toISOString();
       const dobValue = (metadata.dob || metadata.dateOfBirth || '').trim();
-      const cleanCode = (metadata.schoolCode || 'SSHSS@111213').trim().toUpperCase();
+      const cleanCode = this.sanitizeSchoolCode(metadata.schoolCode);
+      const isGoogle = metadata.loginMethod === 'google';
       const payload: Record<string, any> = {
         uid: resolvedUid,
         teacherId: resolvedUid,
         gmail: cleanEmail,
         email: cleanEmail,
         role: metadata.role || 'teacher',
-        name: metadata.name || '',
+        name: (metadata.name || '').slice(0, 150),
         schoolCode: cleanCode,
-        schoolName: metadata.schoolName || '',
+        schoolName: (metadata.schoolName || '').slice(0, 200),
         loginMethod: metadata.loginMethod || 'email',
+        authProvider: isGoogle ? 'google' : 'email_password',
+        passwordProtected: true,
+        credentialStatus: isGoogle ? 'Google OAuth Protected' : 'Firebase Auth Protected',
         lastEntryAt: now,
         updatedAt: now
       };
       if (dobValue) {
-        payload.dob = dobValue;
-        payload.dateOfBirth = dobValue;
+        payload.dob = dobValue.slice(0, 32);
+        payload.dateOfBirth = dobValue.slice(0, 32);
       }
-      if (metadata.phone) payload.phone = metadata.phone;
-      if (metadata.subject) payload.subject = metadata.subject;
-      if (metadata.assignedClass) payload.assignedClass = metadata.assignedClass;
-      if (metadata.designation) payload.designation = metadata.designation;
+      if (metadata.phone) payload.phone = String(metadata.phone).slice(0, 40);
+      if (metadata.subject) payload.subject = String(metadata.subject).slice(0, 100);
+      if (metadata.assignedClass) payload.assignedClass = String(metadata.assignedClass).slice(0, 150);
+      if (metadata.designation) payload.designation = String(metadata.designation).slice(0, 100);
 
       const credCollection = payload.role === 'admin' ? 'admin_credentials' : 'teacher_credentials';
 
       const ops: Promise<any>[] = [];
       if (database) {
         ops.push(update(ref(database, `gmail/${safeKey}`), payload).catch(() => {}));
+        ops.push(update(ref(database, `schools/${cleanCode}/gmail/${safeKey}`), payload).catch(() => {}));
         ops.push(update(ref(database, `${credCollection}/${safeKey}`), payload).catch(() => {}));
       }
       if (firestore) {
         ops.push(fsSetDoc(fsDoc(firestore, 'gmail', safeKey), payload, { merge: true }));
         ops.push(fsSetDoc(fsDoc(firestore, credCollection, safeKey), payload, { merge: true }));
+        ops.push(
+          fsSetDoc(fsDoc(firestore, `schools/${cleanCode}/gmail/${safeKey}`), payload, { merge: true }).catch(e =>
+            console.warn('Firestore school gmail directory note:', e)
+          )
+        );
       }
       await Promise.allSettled(ops);
     } catch (e) {
       console.warn('recordGmailEntry note:', e);
     }
+  }
+
+  /**
+   * Provisions and replicates the full HSS ALL IN ONE Firestore structure under
+   * `/schools/{cleanCode}/...` whenever a user signs up, signs in, or updates School Code.
+   * Existing data under SSHSS@111213 remains completely intact; new schoolCodes receive an
+   * isolated, identically structured tenant tree.
+   */
+  public async provisionSchoolSpace(
+    schoolCode: string,
+    options: {
+      schoolProfile?: Partial<SchoolProfile>;
+      teacher?: TeacherAccount | null;
+      admin?: SchoolAdminAccount | null;
+      includeUserData?: boolean;
+      reason?: string;
+    } = {}
+  ): Promise<boolean> {
+    const currentUser = auth?.currentUser;
+    if (!currentUser) return false;
+
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
+    const uid = currentUser.uid;
+    const session = StorageService.getAuthSession();
+    const localSchool = StorageService.getSchoolProfile();
+    const localTeacherInfo = StorageService.getTeacherInfo();
+    const nowIso = new Date().toISOString();
+
+    const activeTeacher = options.teacher !== undefined ? options.teacher : session.currentTeacher;
+    const activeAdmin = options.admin !== undefined ? options.admin : session.currentAdmin;
+    const isAdminUser = Boolean(activeAdmin || session.role === 'admin');
+    const cleanEmail = (
+      activeTeacher?.email ||
+      activeTeacher?.gmail ||
+      activeAdmin?.email ||
+      currentUser.email ||
+      localTeacherInfo.email ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+
+    const schoolName = (
+      options.schoolProfile?.schoolName ||
+      activeTeacher?.schoolName ||
+      activeAdmin?.schoolName ||
+      localSchool.schoolName ||
+      "St. Sebastian's Higher Secondary School"
+    )
+      .trim()
+      .slice(0, 200);
+
+    const displayName = (
+      activeAdmin?.adminName ||
+      activeTeacher?.name ||
+      localTeacherInfo.teacherName ||
+      currentUser.displayName ||
+      'Teacher'
+    )
+      .trim()
+      .slice(0, 150);
+
+    const updatedSchoolProfile: SchoolProfile = {
+      ...localSchool,
+      ...(options.schoolProfile || {}),
+      schoolName,
+      schoolCode: cleanCode
+    };
+
+    const sanitizedTeacher: TeacherAccount | null = activeTeacher
+      ? {
+          ...(this.sanitizeForFirestore(activeTeacher) as TeacherAccount),
+          id: uid,
+          uid,
+          email: cleanEmail,
+          gmail: cleanEmail,
+          schoolName,
+          schoolCode: cleanCode,
+          lastActiveAt: nowIso
+        }
+      : null;
+
+    const sanitizedAdmin: SchoolAdminAccount | null = activeAdmin
+      ? {
+          ...(this.sanitizeForFirestore(activeAdmin) as SchoolAdminAccount),
+          id: uid,
+          email: cleanEmail,
+          schoolName,
+          schoolCode: cleanCode
+        }
+      : null;
+
+    if (firestore) {
+      // 1. Update /users/{uid}.schoolCode FIRST so Firestore tenant security rule `isUserInSchool(cleanCode)` passes
+      const userDocRef = fsDoc(firestore, 'users', uid);
+      let existingRole = isAdminUser ? 'admin' : 'teacher';
+      try {
+        const snap = await fsGetDoc(userDocRef).catch(() => null);
+        if (snap && snap.exists()) {
+          const r = snap.data()?.role;
+          if (r === 'admin' || r === 'schoolAdmin') existingRole = r;
+        }
+      } catch {}
+
+      const userPayload: Record<string, any> = {
+        userId: uid,
+        uid,
+        email: cleanEmail,
+        gmail: cleanEmail,
+        role: existingRole,
+        schoolCode: cleanCode,
+        schoolName,
+        displayName,
+        name: displayName,
+        phone: String(activeTeacher?.phone || activeAdmin?.phone || localTeacherInfo.phone || '').slice(0, 40),
+        dob: String(activeTeacher?.dob || activeAdmin?.dob || '').slice(0, 32),
+        status: 'active',
+        updatedAt: nowIso
+      };
+      if (sanitizedTeacher) userPayload.teacherAccount = sanitizedTeacher;
+      if (sanitizedAdmin) userPayload.adminAccount = sanitizedAdmin;
+
+      try {
+        await fsSetDoc(userDocRef, userPayload, { merge: true });
+      } catch (err) {
+        console.warn('[CloudSync] provisionSchoolSpace /users write warning:', err);
+        return false;
+      }
+
+      // 2. Create /schools/{cleanCode} root + schoolProfile/info
+      const rootOps: Promise<any>[] = [
+        fsSetDoc(
+          fsDoc(firestore, `schools/${cleanCode}`),
+          { schoolCode: cleanCode, schoolName, updatedAt: nowIso },
+          { merge: true }
+        ),
+        fsSetDoc(
+          fsDoc(firestore, `schools/${cleanCode}/schoolProfile/info`),
+          {
+            schoolName,
+            schoolCode: cleanCode,
+            schoolAddress: updatedSchoolProfile.schoolAddress || '',
+            schoolPhone: updatedSchoolProfile.schoolPhone || '',
+            schoolEmail: updatedSchoolProfile.schoolEmail || cleanEmail || '',
+            principalName: updatedSchoolProfile.principalName || '',
+            principalPhone: updatedSchoolProfile.principalPhone || ''
+          },
+          { merge: true }
+        )
+      ];
+      await Promise.allSettled(rootOps);
+    }
+
+    // 3. Replicate teacher / gmail / email directory records inside /schools/{cleanCode}/...
+    const bgOps: Promise<any>[] = [];
+    if (sanitizedTeacher) {
+      bgOps.push(this.saveTeacherToSchool(cleanCode, sanitizedTeacher).catch(() => false));
+    }
+    if (cleanEmail) {
+      const authMethod = currentUser.providerData?.some(p => p.providerId === 'google.com') ? 'google' : 'email';
+      bgOps.push(
+        this.recordGmailEntry(cleanEmail, {
+          role: isAdminUser ? 'admin' : 'teacher',
+          name: displayName,
+          schoolCode: cleanCode,
+          schoolName,
+          loginMethod: authMethod,
+          dob: activeTeacher?.dob || activeAdmin?.dob || '',
+          teacherId: uid,
+          uid,
+          phone: activeTeacher?.phone || activeAdmin?.phone || localTeacherInfo.phone || '',
+          subject: activeTeacher?.subject || activeTeacher?.primarySubject || '',
+          assignedClass: activeTeacher?.assignedClass || '',
+          designation: activeTeacher?.designation || activeAdmin?.designation || localTeacherInfo.designation || ''
+        }).catch(() => {})
+      );
+    }
+
+    // 4. Replicate full classroom, student, attendance, exam, timetable, timetablePrefs, and reminder tree
+    if (options.includeUserData !== false) {
+      const bundle = this.gatherAllLocalData();
+      const targetClasses = (bundle.classesCatalog || []).filter(c => {
+        if (!c || !c.id) return false;
+        const cUid = c.teacherUid || c.teacherId || c.createdByTeacherId || '';
+        const cEmail = (c.createdByTeacherEmail || '').trim().toLowerCase();
+        return !cUid || cUid === uid || (cleanEmail && cEmail === cleanEmail) || bundle.classesCatalog.length === 1;
+      });
+
+      for (const cls of targetClasses) {
+        const scoped = bundle.classData?.[cls.id];
+        const clsStudents = scoped?.students || [];
+        const clsAttendance = scoped?.attendance || [];
+        const clsExams = scoped?.exams || [];
+        const clsMarksMap = scoped?.examMarksMap || {};
+
+        const updatedCls: ClassItem = {
+          ...cls,
+          schoolCode: cleanCode,
+          teacherId: cls.teacherId || uid,
+          teacherUid: cls.teacherUid || uid,
+          createdByTeacherId: cls.createdByTeacherId || uid,
+          createdByTeacherEmail: cls.createdByTeacherEmail || cleanEmail
+        };
+
+        bgOps.push(this.saveClassToSchool(cleanCode, updatedCls, clsStudents).catch(() => false));
+        for (const s of clsStudents) {
+          if (s && s.id) {
+            bgOps.push(this.saveStudentToSchool(cleanCode, s, cls.id).catch(() => false));
+          }
+        }
+        for (const att of clsAttendance) {
+          if (att && att.id) {
+            bgOps.push(this.saveAttendanceToSchool(cleanCode, cls.id, att).catch(() => false));
+          }
+        }
+        for (const ex of clsExams) {
+          if (ex && ex.id) {
+            bgOps.push(this.saveExamToSchool(cleanCode, cls.id, ex).catch(() => false));
+          }
+        }
+        for (const [exId, markRec] of Object.entries(clsMarksMap)) {
+          if (exId && markRec) {
+            bgOps.push(
+              this.saveExamMarksToSchool(cleanCode, cls.id, { ...markRec, examId: markRec.examId || exId }).catch(() => false)
+            );
+          }
+        }
+      }
+
+      const slots = StorageService.getTimetables();
+      const teacherSlots = slots.filter(s => s && (!s.teacherId || s.teacherId === uid));
+      if (teacherSlots.length > 0) {
+        for (const slot of teacherSlots) {
+          bgOps.push(this.saveTimetableSlotToSchool(cleanCode, { ...slot, schoolCode: cleanCode }).catch(() => false));
+        }
+      }
+
+      const timings = StorageService.getPeriodTimings(cleanCode, uid);
+      const includeSat = StorageService.isSaturdayIncluded(cleanCode, uid);
+      bgOps.push(
+        this.saveTimetablePrefsToSchool(cleanCode, {
+          includeSaturday: includeSat,
+          periodTimings: timings
+        }).catch(() => false)
+      );
+
+      if (bundle.reminders && bundle.reminders.length > 0) {
+        bgOps.push(this.saveRemindersToSchool(cleanCode, bundle.reminders).catch(() => false));
+      }
+    }
+
+    bgOps.push(
+      this.recordTeacherActivity(cleanCode, {
+        teacherId: uid,
+        teacherName: displayName,
+        subject: activeTeacher?.subject || activeTeacher?.primarySubject || 'General',
+        assignedClass: activeTeacher?.assignedClass || '',
+        activityType: 'profile_updated',
+        description: options.reason || `Provisioned school space under ${cleanCode}`
+      }).catch(() => {})
+    );
+
+    await Promise.race([
+      Promise.allSettled(bgOps),
+      new Promise(resolve => setTimeout(resolve, 3500))
+    ]);
+
+    return true;
+  }
+
+  /**
+   * Lists all registered School Codes across Firestore (`schools`, `teachers`, `gmail`), RTDB, and local cache.
+   * Allows authorized School Admins to switch between school workspaces cleanly.
+   */
+  public async fetchRegisteredSchoolCodes(): Promise<string[]> {
+    const codeSet = new Set<string>(['SSHSS@111213']);
+    const addCode = (raw?: string) => {
+      const normalized = this.sanitizeSchoolCode(raw, '');
+      if (normalized && /^[A-Z0-9_\-.@]+$/.test(normalized) && normalized.length <= 64) {
+        codeSet.add(normalized);
+      }
+    };
+
+    try {
+      const localProfile = StorageService.getSchoolProfile();
+      addCode(localProfile.schoolCode);
+      StorageService.getTeacherAccounts().forEach(t => addCode(t?.schoolCode));
+      StorageService.getClassesList().forEach(c => addCode(c?.schoolCode));
+    } catch {}
+
+    const lookups: Promise<any>[] = [];
+    if (firestore) {
+      lookups.push(
+        fsGetDocs(fsCollection(firestore, 'schools'))
+          .then(snap => {
+            snap.forEach((d: any) => {
+              addCode(d.data()?.schoolCode || d.id);
+            });
+          })
+          .catch(() => {})
+      );
+      lookups.push(
+        fsGetDocs(fsCollection(firestore, 'gmail'))
+          .then(snap => {
+            snap.forEach((d: any) => {
+              addCode(d.data()?.schoolCode);
+            });
+          })
+          .catch(() => {})
+      );
+      lookups.push(
+        fsGetDocs(fsCollection(firestore, 'teachers'))
+          .then(snap => {
+            snap.forEach((d: any) => {
+              addCode(d.data()?.schoolCode);
+            });
+          })
+          .catch(() => {})
+      );
+    }
+    if (database) {
+      lookups.push(
+        get(ref(database, 'schools'))
+          .then(snap => {
+            if (snap.exists()) {
+              snap.forEach(child => {
+                addCode(child.key || undefined);
+              });
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    await Promise.race([
+      Promise.allSettled(lookups),
+      new Promise<void>(resolve => setTimeout(resolve, 2500))
+    ]);
+
+    const sorted = Array.from(codeSet).sort((a, b) => {
+      if (a === 'SSHSS@111213') return -1;
+      if (b === 'SSHSS@111213') return 1;
+      return a.localeCompare(b);
+    });
+    return sorted;
   }
 
   /**
@@ -3540,7 +3958,7 @@ class CloudSyncManager {
     }
   ): Promise<void> {
     if (!schoolCode) return;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const actId = `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
@@ -3594,7 +4012,7 @@ class CloudSyncManager {
     onTeachersUpdated: (teachers: TeacherAccount[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     if (this.unsubscribeSchoolTeachersSnapshot) {
       try {
@@ -3638,7 +4056,7 @@ class CloudSyncManager {
         gmail: email,
         dob: raw.dob || raw.dateOfBirth || '',
         phone: raw.phone || raw.mobileNumber || '',
-        schoolCode: (raw.schoolCode || cleanCode).trim().toUpperCase(),
+        schoolCode: this.sanitizeSchoolCode(raw.schoolCode || cleanCode, cleanCode),
         status: 'active'
       };
     };
@@ -3703,7 +4121,7 @@ class CloudSyncManager {
         }
       });
 
-      const otherSchoolTeachers = localTeachers.filter(lt => (lt.schoolCode || '').trim().toUpperCase() !== cleanCode);
+      const otherSchoolTeachers = localTeachers.filter(lt => this.sanitizeSchoolCode(lt.schoolCode, '') !== cleanCode);
       StorageService.saveTeacherAccounts([...otherSchoolTeachers, ...mergedList]);
       onTeachersUpdated(mergedList);
     };
@@ -3727,7 +4145,7 @@ class CloudSyncManager {
               if (rootTeachersSnap && rootTeachersSnap.exists()) {
                 rootTeachersSnap.forEach(child => {
                   const val = child.val();
-                  if (val && val.schoolCode && val.schoolCode.trim().toUpperCase() === cleanCode) {
+                  if (val && val.schoolCode && this.sanitizeSchoolCode(val.schoolCode, '') === cleanCode) {
                     const norm = normalizeRecord(val, child.key || undefined);
                     if (norm) rtdbTeachersMap.set(norm.id, norm);
                   }
@@ -3827,7 +4245,7 @@ class CloudSyncManager {
 
   public async clearSchoolActivities(schoolCode: string): Promise<boolean> {
     if (!schoolCode) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     try {
       if (database) {
         const activitiesRefPath = ref(database, `schools/${cleanCode}/activities`);
@@ -3853,7 +4271,7 @@ class CloudSyncManager {
     onActivitiesUpdated: (activities: TeacherActivityItem[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     if (this.unsubscribeSchoolActivitiesSnapshot) {
       try {
@@ -3935,7 +4353,7 @@ class CloudSyncManager {
   // ------------------ SCHOOL BROADCASTS ------------------
   public async saveBroadcastToSchool(schoolCode: string, broadcast: PrincipalBroadcast): Promise<boolean> {
     if (!schoolCode || !broadcast || !broadcast.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanBroadcast: Record<string, any> = {
       id: broadcast.id,
       schoolCode: cleanCode,
@@ -3974,7 +4392,7 @@ class CloudSyncManager {
 
   public async deleteBroadcastFromSchool(schoolCode: string, broadcastId: string): Promise<boolean> {
     if (!schoolCode || !broadcastId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       try {
         await remove(ref(database, `schools/${cleanCode}/broadcasts/${broadcastId}`));
@@ -4001,7 +4419,7 @@ class CloudSyncManager {
     onBroadcastsUpdated: (broadcasts: PrincipalBroadcast[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const fsMap = new Map<string, PrincipalBroadcast>();
     const rtdbMap = new Map<string, PrincipalBroadcast>();
 
@@ -4056,7 +4474,7 @@ class CloudSyncManager {
   // ------------------ SCHOOL TIMETABLES & PERIOD PREFS ------------------
   public async saveTimetableSlotToSchool(schoolCode: string, slot: TimetableSlot): Promise<boolean> {
     if (!schoolCode || !slot || !slot.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanSlot = this.sanitizeTimetablePayload(slot, cleanCode, auth?.currentUser?.uid);
     if (database) {
       try {
@@ -4078,7 +4496,7 @@ class CloudSyncManager {
 
   public async saveTimetablesToSchool(schoolCode: string, slots: TimetableSlot[]): Promise<boolean> {
     if (!schoolCode) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const uid = auth?.currentUser?.uid;
 
     if (database) {
@@ -4123,7 +4541,7 @@ class CloudSyncManager {
 
   public async deleteTimetableSlotFromSchool(schoolCode: string, slotId: string): Promise<boolean> {
     if (!schoolCode || !slotId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       try {
         await remove(ref(database, `schools/${cleanCode}/timetables/${slotId}`));
@@ -4145,7 +4563,7 @@ class CloudSyncManager {
     prefs: { includeSaturday: boolean; periodTimings: any[] }
   ): Promise<boolean> {
     if (!schoolCode) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const uid = auth?.currentUser?.uid || '';
     const nowIso = new Date().toISOString();
     const payload = {
@@ -4178,7 +4596,7 @@ class CloudSyncManager {
     onTimetablesUpdated: (slots: TimetableSlot[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const fsMap = new Map<string, TimetableSlot>();
     const rtdbMap = new Map<string, TimetableSlot>();
 
@@ -4230,7 +4648,7 @@ class CloudSyncManager {
   // ------------------ SCHOOL STUDENTS ------------------
   public async saveStudentToSchool(schoolCode: string, student: Student, classIdOverride?: string): Promise<boolean> {
     if (!schoolCode || !student || !student.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const clsId = classIdOverride || student.classId || '';
     const cleanStudent = this.sanitizeStudentPayload(student, clsId, cleanCode, auth?.currentUser?.uid);
 
@@ -4261,7 +4679,7 @@ class CloudSyncManager {
 
   public async deleteStudentFromSchool(schoolCode: string, studentId: string, classId?: string): Promise<boolean> {
     if (!schoolCode || !studentId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       try {
         await remove(ref(database, `schools/${cleanCode}/students/${studentId}`));
@@ -4292,7 +4710,7 @@ class CloudSyncManager {
     onStudentsUpdated: (students: Student[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const fsMap = new Map<string, Student>();
     const rtdbMap = new Map<string, Student>();
 
@@ -4344,7 +4762,7 @@ class CloudSyncManager {
   // ------------------ ATTENDANCE, EXAMS, MARKS & REMINDERS DIRECT FIRESTORE SYNC ------------------
   public async saveAttendanceToSchool(schoolCode: string, classId: string, record: AttendanceRecord): Promise<boolean> {
     if (!schoolCode || !classId || !record?.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanPayload = this.sanitizeAttendancePayload(record, classId, cleanCode, auth?.currentUser?.uid);
     if (database) {
       await set(ref(database, `schools/${cleanCode}/classes/${classId}/attendance/${record.id}`), cleanPayload).catch(() => {});
@@ -4361,7 +4779,7 @@ class CloudSyncManager {
 
   public async deleteAttendanceFromSchool(schoolCode: string, classId: string, recordId: string): Promise<boolean> {
     if (!schoolCode || !classId || !recordId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       await remove(ref(database, `schools/${cleanCode}/classes/${classId}/attendance/${recordId}`)).catch(() => {});
     }
@@ -4377,7 +4795,7 @@ class CloudSyncManager {
 
   public async saveExamToSchool(schoolCode: string, classId: string, exam: Exam): Promise<boolean> {
     if (!schoolCode || !classId || !exam?.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanPayload = this.sanitizeExamPayload(exam, classId, cleanCode, auth?.currentUser?.uid);
     if (database) {
       await set(ref(database, `schools/${cleanCode}/classes/${classId}/exams/${exam.id}`), cleanPayload).catch(() => {});
@@ -4394,7 +4812,7 @@ class CloudSyncManager {
 
   public async deleteExamFromSchool(schoolCode: string, classId: string, examId: string): Promise<boolean> {
     if (!schoolCode || !classId || !examId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       await remove(ref(database, `schools/${cleanCode}/classes/${classId}/exams/${examId}`)).catch(() => {});
       await remove(ref(database, `schools/${cleanCode}/classes/${classId}/examMarks/${examId}`)).catch(() => {});
@@ -4414,7 +4832,7 @@ class CloudSyncManager {
 
   public async saveExamMarksToSchool(schoolCode: string, classId: string, record: ExamMarksRecord): Promise<boolean> {
     if (!schoolCode || !classId || !record?.examId) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const uid = auth?.currentUser?.uid || '';
     const cleanPayload = {
       examId: record.examId,
@@ -4440,7 +4858,7 @@ class CloudSyncManager {
 
   public async saveRemindersToSchool(schoolCode: string, reminders: Reminder[]): Promise<boolean> {
     if (!schoolCode) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const uid = auth?.currentUser?.uid || '';
     if (firestore) {
       try {
@@ -4472,7 +4890,7 @@ class CloudSyncManager {
   // ------------------ SCHOOL PROFILE ------------------
   public async saveSchoolProfileToSchool(schoolCode: string, profile: SchoolProfile): Promise<boolean> {
     if (!schoolCode || !profile) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanProfile: Record<string, any> = {
       schoolName: profile.schoolName || "St. Sebastian's Higher Secondary School",
       schoolCode: cleanCode,
@@ -4503,7 +4921,7 @@ class CloudSyncManager {
     onProfileUpdated: (profile: SchoolProfile) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
 
     let unsubFs: (() => void) | null = null;
     if (firestore) {
@@ -4544,7 +4962,7 @@ class CloudSyncManager {
   // ------------------ AUDIT LOGS ------------------
   public async saveAuditLogToSchool(schoolCode: string, logItem: AuditLogItem): Promise<boolean> {
     if (!schoolCode || !logItem || !logItem.id) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const cleanLog: Record<string, any> = {
       id: logItem.id,
       schoolCode: cleanCode,
@@ -4573,7 +4991,7 @@ class CloudSyncManager {
 
   public async clearAuditLogsFromSchool(schoolCode: string): Promise<boolean> {
     if (!schoolCode) return false;
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     if (database) {
       try {
         await remove(ref(database, `schools/${cleanCode}/auditLogs`));
@@ -4599,7 +5017,7 @@ class CloudSyncManager {
     onAuditLogsUpdated: (logs: AuditLogItem[]) => void
   ): () => void {
     if (!schoolCode) return () => {};
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const fsMap = new Map<string, AuditLogItem>();
     const rtdbMap = new Map<string, AuditLogItem>();
 
@@ -4651,7 +5069,7 @@ class CloudSyncManager {
 
   public async fetchSchoolTeachers(schoolCode: string): Promise<TeacherAccount[]> {
     if (!schoolCode) return [];
-    const cleanCode = schoolCode.trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const teachersMap = new Map<string, TeacherAccount>();
 
     if (database) {
@@ -4701,7 +5119,7 @@ class CloudSyncManager {
   }> {
     if (!gmail || !gmail.trim()) return { found: false, valid: false, reason: 'not_found' };
     const cleanGmail = gmail.trim().toLowerCase();
-    const cleanSchoolCode = schoolCode ? schoolCode.trim().toUpperCase() : '';
+    const cleanSchoolCode = schoolCode ? this.sanitizeSchoolCode(schoolCode, '') : '';
 
     // Fast local accounts check first (0ms)
     try {
@@ -4940,7 +5358,7 @@ class CloudSyncManager {
     };
   }> {
     const cleanEmail = (email || '').trim().toLowerCase();
-    const cleanSchoolCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanSchoolCode = this.sanitizeSchoolCode(schoolCode);
     const nowIso = new Date().toISOString();
 
     if (!cleanEmail || !cleanSchoolCode) {
@@ -5103,7 +5521,7 @@ class CloudSyncManager {
       details?: string;
     }
   ): Promise<void> {
-    const cleanCode = (schoolCode || 'SSHSS@111213').trim().toUpperCase();
+    const cleanCode = this.sanitizeSchoolCode(schoolCode);
     const actId = `login-act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
