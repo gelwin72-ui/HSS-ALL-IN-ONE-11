@@ -4993,26 +4993,29 @@ class CloudSyncManager {
       updatedAt: nowIso
     };
 
-    // Verify pre-authorized School Admin token with backend (zero-IAM)
-    if (auth?.currentUser) {
-      try {
-        const idToken = await auth.currentUser.getIdToken();
-        await fetch('/api/admin/bootstrap', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`
-          },
-          body: JSON.stringify({
-            schoolCode: cleanSchoolCode,
-            adminName: adminNameDetermined,
-            schoolName: adminData.schoolName,
-            designation: adminData.designation
-          })
-        }).catch(() => null);
-      } catch (e) {
-        console.warn('Admin token verification note:', e);
-      }
+    // Notify Express admin bootstrap in background only when not on static hosting (e.g. GitHub Pages)
+    const isStaticHost = typeof window !== 'undefined' && (
+      window.location.hostname.endsWith('.github.io') ||
+      window.location.protocol === 'file:'
+    );
+    if (auth?.currentUser && !isStaticHost) {
+      auth.currentUser.getIdToken()
+        .then((idToken) =>
+          fetch('/api/admin/bootstrap', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`
+            },
+            body: JSON.stringify({
+              schoolCode: cleanSchoolCode,
+              adminName: adminNameDetermined,
+              schoolName: adminData.schoolName,
+              designation: adminData.designation
+            })
+          }).catch(() => null)
+        )
+        .catch(() => null);
     }
 
     if (database) {
@@ -5030,30 +5033,32 @@ class CloudSyncManager {
           role: 'admin',
           updatedAt: nowIso
         };
-        await update(ref(database), updates).catch(e => console.warn('RTDB admin sync bg note:', e));
+        update(ref(database), updates).catch(e => console.warn('RTDB admin sync bg note:', e));
       } catch (e) {}
     }
 
     if (firestore) {
       try {
-        // Create/update /admins/{uid} FIRST so /admins/{uid} exists for subsequent admin rule checks
-        await fsSetDoc(fsDoc(firestore, `admins/${resolvedUid}`), adminData, { merge: true });
-        await fsSetDoc(fsDoc(firestore, `users/${resolvedUid}`), {
-          userId: resolvedUid,
-          uid: resolvedUid,
-          email: cleanEmail,
-          gmail: cleanEmail,
-          role: 'admin',
-          schoolCode: cleanSchoolCode,
-          schoolName: adminData.schoolName,
-          active: true,
-          status: 'active',
-          displayName: adminData.adminName,
-          name: adminData.adminName,
-          updatedAt: nowIso
-        }, { merge: true });
-
+        // Create/update /admins/{uid} and /users/{uid} in parallel first
         await Promise.all([
+          fsSetDoc(fsDoc(firestore, `admins/${resolvedUid}`), adminData, { merge: true }),
+          fsSetDoc(fsDoc(firestore, `users/${resolvedUid}`), {
+            userId: resolvedUid,
+            uid: resolvedUid,
+            email: cleanEmail,
+            gmail: cleanEmail,
+            role: 'admin',
+            schoolCode: cleanSchoolCode,
+            schoolName: adminData.schoolName,
+            active: true,
+            status: 'active',
+            displayName: adminData.adminName,
+            name: adminData.adminName,
+            updatedAt: nowIso
+          }, { merge: true })
+        ]);
+
+        Promise.allSettled([
           fsSetDoc(fsDoc(firestore, `schoolAdmins/${resolvedUid}`), adminData, { merge: true }),
           fsSetDoc(fsDoc(firestore, `schools/${cleanSchoolCode}/schoolAdmins/${resolvedUid}`), adminData, { merge: true }),
           fsSetDoc(fsDoc(firestore, `admin_credentials/${emailKey}`), {
@@ -5065,7 +5070,7 @@ class CloudSyncManager {
             role: 'admin',
             updatedAt: nowIso
           }, { merge: true })
-        ]);
+        ]).catch(() => {});
       } catch (e) {
         console.error('Firestore admin sync error:', e);
         handleFirestoreError(e, OperationType.WRITE, `admins/${resolvedUid}`);

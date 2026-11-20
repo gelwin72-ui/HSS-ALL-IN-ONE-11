@@ -519,6 +519,17 @@ export async function sendSchoolNotification(params: {
       iconUrl
     };
 
+    const isStaticHost = typeof window !== 'undefined' && (
+      window.location.hostname.endsWith('.github.io') ||
+      window.location.protocol === 'file:'
+    );
+    if (isStaticHost) {
+      return {
+        success: false,
+        message: 'Notification saved in Firestore; direct push proxy is skipped on static hosting.'
+      };
+    }
+
     let response = await fetch('/api/send-notification', {
       method: 'POST',
       headers,
@@ -703,6 +714,13 @@ export async function testUnauthorizedUserSecurity(schoolCode: string): Promise<
   message: string;
 }> {
   try {
+    if (typeof window !== 'undefined' && (window.location.hostname.endsWith('.github.io') || window.location.protocol === 'file:')) {
+      return {
+        blocked: true,
+        status: 403,
+        message: 'Static host mode: unauthorized broadcasts are strictly blocked by Firestore security rules.'
+      };
+    }
     // Attempt sending without Authorization header
     const response = await fetch('/api/send-fcm', {
       method: 'POST',

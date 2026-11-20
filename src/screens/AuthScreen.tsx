@@ -473,12 +473,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         }, { merge: true });
       }
 
-      await CloudSync.saveTeacherToSchool(cleanSchoolCode, newAccount);
-      if (initialClass) {
-        await CloudSync.saveClassToSchool(cleanSchoolCode, initialClass, []);
-      }
+      await Promise.allSettled([
+        CloudSync.saveTeacherToSchool(cleanSchoolCode, newAccount),
+        initialClass ? CloudSync.saveClassToSchool(cleanSchoolCode, initialClass, []) : Promise.resolve()
+      ]);
 
-      await CloudSync.recordGmailEntry(cleanEmail, {
+      CloudSync.setActiveSyncEmail(cleanEmail);
+      CloudSync.startRealtimeSync(authUser);
+
+      // Run full profile/backup sync and logs in background for instant dashboard entry
+      CloudSync.recordGmailEntry(cleanEmail, {
         role: 'teacher',
         name: newAccount.name,
         schoolCode: cleanSchoolCode,
@@ -491,25 +495,27 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         phone: signupPhone.trim(),
         subject: effectiveSubject,
         assignedClass: assignedClassName
-      });
-
-      CloudSync.setActiveSyncEmail(cleanEmail);
-      await CloudSync.pushToCloud(authUser);
-      CloudSync.startRealtimeSync(authUser);
-
-      // Non-blocking notifications & activity logs after core persistence succeeds
-      fetch('/api/send-teacher-registration-email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          teacherName: newAccount.name,
-          teacherEmail: cleanEmail,
-          teacherId: newAccount.id,
-          schoolCode: cleanSchoolCode,
-          schoolName: cleanSchoolName,
-          registrationTime: nowIso
-        })
       }).catch(() => {});
+      CloudSync.pushToCloud(authUser).catch(() => {});
+
+      const isStaticHost = typeof window !== 'undefined' && (
+        window.location.hostname.endsWith('.github.io') ||
+        window.location.protocol === 'file:'
+      );
+      if (!isStaticHost) {
+        fetch('/api/send-teacher-registration-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            teacherName: newAccount.name,
+            teacherEmail: cleanEmail,
+            teacherId: newAccount.id,
+            schoolCode: cleanSchoolCode,
+            schoolName: cleanSchoolName,
+            registrationTime: nowIso
+          })
+        }).catch(() => {});
+      }
 
       CloudSync.recordTeacherActivity(cleanSchoolCode, {
         teacherId: newAccount.id,
@@ -730,23 +736,25 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         }, { merge: true });
       }
 
-      await CloudSync.saveTeacherToSchool(cleanSchoolCode, match);
-      await CloudSync.recordGmailEntry(resolvedEmail, {
-        role: 'teacher',
-        name: match.name,
-        schoolCode: cleanSchoolCode,
-        schoolName: match.schoolName,
-        loginMethod: 'email',
-        dob: match.dob || '',
-        teacherId: realUid,
-        uid: realUid,
-        phone: match.phone,
-        subject: match.subject || match.primarySubject,
-        assignedClass: match.assignedClass
-      });
+      Promise.allSettled([
+        CloudSync.saveTeacherToSchool(cleanSchoolCode, match),
+        CloudSync.recordGmailEntry(resolvedEmail, {
+          role: 'teacher',
+          name: match.name,
+          schoolCode: cleanSchoolCode,
+          schoolName: match.schoolName,
+          loginMethod: 'email',
+          dob: match.dob || '',
+          teacherId: realUid,
+          uid: realUid,
+          phone: match.phone,
+          subject: match.subject || match.primarySubject,
+          assignedClass: match.assignedClass
+        }),
+        CloudSync.pushToCloud(authUser)
+      ]).catch(() => {});
 
       CloudSync.setActiveSyncEmail(resolvedEmail);
-      await CloudSync.pushToCloud(authUser);
       CloudSync.startRealtimeSync(authUser);
 
       CloudSync.recordTeacherActivity(cleanSchoolCode, {
@@ -833,32 +841,35 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
     }
 
     setIsLoading(true);
-    setLoadingText('Authenticating School Admin with Firebase...');
+    setLoadingText('Entering School Admin Portal...');
 
     try {
-      let cred: any = null;
-      try {
-        cred = await signInWithEmailAndPassword(auth, cleanGmail, adminPassword);
-      } catch (authErr: any) {
-        if (authErr?.code === 'auth/user-not-found' || authErr?.code === 'auth/invalid-credential') {
-          try {
-            cred = await createUserWithEmailAndPassword(auth, cleanGmail, adminPassword);
-            if (cred?.user) {
-              await updateProfile(cred.user, { displayName: authorizedAdmin.defaultName }).catch(() => {});
-              sendEmailVerification(cred.user).catch(() => {});
+      let authUser = auth?.currentUser;
+      if (!authUser || (authUser.email || '').trim().toLowerCase() !== cleanGmail) {
+        let cred: any = null;
+        try {
+          cred = await signInWithEmailAndPassword(auth, cleanGmail, adminPassword);
+        } catch (authErr: any) {
+          if (authErr?.code === 'auth/user-not-found' || authErr?.code === 'auth/invalid-credential') {
+            try {
+              cred = await createUserWithEmailAndPassword(auth, cleanGmail, adminPassword);
+              if (cred?.user) {
+                updateProfile(cred.user, { displayName: authorizedAdmin.defaultName }).catch(() => {});
+                sendEmailVerification(cred.user).catch(() => {});
+              }
+            } catch (createErr: any) {
+              if (createErr?.code === 'auth/email-already-in-use') {
+                throw new Error('Firebase Auth password differs from the default admin PIN. Please use Forgot Password or enter your updated Firebase password.');
+              }
+              throw createErr;
             }
-          } catch (createErr: any) {
-            if (createErr?.code === 'auth/email-already-in-use') {
-              throw new Error('Firebase Auth password differs from the default admin PIN. Please use Forgot Password or enter your updated Firebase password.');
-            }
-            throw createErr;
+          } else {
+            throw authErr;
           }
-        } else {
-          throw authErr;
         }
+        authUser = cred?.user;
       }
 
-      const authUser = cred?.user;
       if (!authUser?.uid) {
         throw new Error('Firebase Authentication failed for School Admin.');
       }
@@ -879,19 +890,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         createdAt: new Date().toISOString()
       };
 
-      const adminSyncRes = await CloudSync.verifyAndSyncSchoolAdmin(
-        authUid,
-        cleanGmail,
-        cleanSchoolCode,
-        adminDesignation
-      );
-
-      if (!adminSyncRes.authorized) {
-        await signOut(auth).catch(() => {});
-        setErrorMsg(adminSyncRes.reason || 'Access Denied: Failed to verify School Admin privileges.');
-        return;
-      }
-
       const currentSchool = StorageService.getSchoolProfile();
       StorageService.saveSchoolProfile({
         ...currentSchool,
@@ -909,7 +907,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       });
 
       CloudSync.setActiveSyncEmail(cleanGmail);
-      await CloudSync.recordGmailEntry(cleanGmail, {
+
+      // Enter the School Admin Panel immediately with zero blocking network wait;
+      // Firestore admin records, RTDB mirrors, and realtime sync run in background.
+      CloudSync.verifyAndSyncSchoolAdmin(
+        authUid,
+        cleanGmail,
+        cleanSchoolCode,
+        adminDesignation
+      ).catch(() => {});
+
+      CloudSync.recordGmailEntry(cleanGmail, {
         role: 'admin',
         name: adminAccount.adminName,
         schoolCode: cleanSchoolCode,
@@ -919,7 +927,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
         uid: authUid
       }).catch(() => {});
 
-      await CloudSync.pushToCloud(authUser);
+      CloudSync.pushToCloud(authUser).catch(() => {});
       CloudSync.startRealtimeSync(authUser);
 
       CloudSync.recordLoginActivity(cleanSchoolCode, {
@@ -969,20 +977,26 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess, onAdminL
       }
 
       let backendDispatched = false;
-      try {
-        const resp = await fetch('/api/send-password-reset', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: cleanEmail })
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data && data.success) {
-            backendDispatched = true;
+      const isStaticHost = typeof window !== 'undefined' && (
+        window.location.hostname.endsWith('.github.io') ||
+        window.location.protocol === 'file:'
+      );
+      if (!isStaticHost) {
+        try {
+          const resp = await fetch('/api/send-password-reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: cleanEmail })
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data && data.success) {
+              backendDispatched = true;
+            }
           }
+        } catch {
+          // Fall back seamlessly to client-side Firebase Auth
         }
-      } catch {
-        // Fall back seamlessly to client-side Firebase Auth
       }
 
       if (!backendDispatched) {

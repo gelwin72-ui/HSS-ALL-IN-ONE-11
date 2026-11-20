@@ -194,7 +194,7 @@ export function App() {
             if (currentSession.isLoggedIn && currentSession.role === 'teacher') {
               const schoolProfile = StorageService.getSchoolProfile();
               await CloudSync.restoreTeacherClassroom(firebaseUser.uid, firebaseUser.email || undefined, schoolProfile.schoolCode);
-            } else {
+            } else if (!(currentSession.isLoggedIn && currentSession.role === 'admin')) {
               await CloudSync.fetchFromCloud(firebaseUser);
             }
             const activeTeacher = StorageService.getAuthSession().currentTeacher;

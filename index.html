@@ -179,8 +179,15 @@
           var title = document.createElement('h1');
           title.textContent = 'HSS ALL IN ONE';
           title.setAttribute('style', 'margin:0 0 8px 0;font-size:18px;font-weight:800;color:#fff;');
+          var isRawSourceOnGhPages = Boolean(
+            reason &&
+            String(reason).indexOf('src/main.tsx') !== -1 &&
+            window.location.hostname.indexOf('github.io') !== -1
+          );
           var desc = document.createElement('p');
-          desc.textContent = 'A cached asset or slow connection delayed startup. Tap below to clear stale cache and load the latest version.';
+          desc.textContent = isRawSourceOnGhPages
+            ? 'GitHub Pages is currently serving unbuilt source files (src/main.tsx) instead of the compiled app. In your GitHub repo go to Settings -> Pages -> Source and select "GitHub Actions", then run the Deploy to GitHub Pages workflow.'
+            : 'A cached asset or slow connection delayed startup. Tap below to clear stale cache and load the latest version.';
           desc.setAttribute('style', 'margin:0 0 14px 0;font-size:13px;line-height:1.5;color:#cbd5e1;');
           card.appendChild(title);
           card.appendChild(desc);
